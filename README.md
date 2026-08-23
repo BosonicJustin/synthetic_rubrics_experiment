@@ -53,6 +53,20 @@ must still match the locked SHA-256.
 The downloader fetches the pinned JSONL file directly. It does not import or execute
 remote dataset-loading code.
 
+## Explore the dataset
+
+The [MATH-500 explorer notebook](notebooks/math500_explorer.ipynb) provides schema
+checks, summary tables, subject/level charts, text search, random sampling, and an
+opt-in reference-answer reveal. Prepare the data first, then launch it with:
+
+```bash
+uv sync --extra notebook --frozen
+uv run --extra notebook --frozen jupyter lab notebooks/math500_explorer.ipynb
+```
+
+You can also use `make notebook` after syncing the optional notebook environment.
+The notebook keeps reference answers hidden unless you explicitly enable them.
+
 ## Pinned source
 
 - Repository: [`HuggingFaceH4/MATH-500`](https://huggingface.co/datasets/HuggingFaceH4/MATH-500)
@@ -79,6 +93,7 @@ rendered image. Preparation preserves that source text exactly.
 ```text
 configs/datasets/math500.lock.json  immutable dataset and artifact contract
 scripts/prepare_math500.py          clean-clone entry point
+notebooks/math500_explorer.ipynb    interactive dataset explorer
 src/compute_as_a_teacher/data/      validation, splitting, and safe question loader
 tests/                              offline unit tests and local-data integrity test
 data/raw/                           ignored immutable upstream bytes

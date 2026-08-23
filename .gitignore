@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.ipynb_checkpoints/
 
 # The paper is kept locally for reference, not redistributed by this repo.
 /compute_as_a_teacher.pdf
