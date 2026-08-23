@@ -1,0 +1,149 @@
+schema_version = 1
+kind = "cat_grpo"
+protocol_version = "cat_math500_grpo_verl_v1"
+run_name = "qwen3-4b-math500-cat"
+questions_path = "data/math500/questions.jsonl"
+dataset_lock_path = "configs/datasets/math500.lock.json"
+
+# These identity fields must be replaced with the immutable model snapshot that
+# is present locally before a real plan can be written. Dry-run accepts them.
+[policy]
+provider = "huggingface"
+model_id = "Qwen/Qwen3-4B"
+revision = "required_full_model_commit_sha"
+tokenizer_id = "Qwen/Qwen3-4B"
+tokenizer_revision = "required_full_tokenizer_commit_sha"
+chat_template_sha256 = "required_chat_template_sha256"
+adapter_version = "transformers-vllm-pinned-by-verl-v0.5.0"
+dtype = "bfloat16"
+quantization = "none"
+seed_support = "best_effort"
+
+[anchor]
+source = "initial_policy"
+frozen = true
+
+[anchor.model]
+provider = "huggingface"
+model_id = "Qwen/Qwen3-4B"
+revision = "required_full_model_commit_sha"
+tokenizer_id = "Qwen/Qwen3-4B"
+tokenizer_revision = "required_full_tokenizer_commit_sha"
+chat_template_sha256 = "required_chat_template_sha256"
+adapter_version = "transformers-vllm-pinned-by-verl-v0.5.0"
+dtype = "bfloat16"
+quantization = "none"
+seed_support = "best_effort"
+
+[rollouts]
+group_size = 8
+fresh_per_step = true
+
+[rollouts.prompt]
+path = "prompts/math500/solve_v1.txt"
+version = "raw_math500_local_v1"
+prefix = "/no_think\n"
+
+[rollouts.sampling]
+do_sample = true
+temperature = 0.7
+top_p = 0.8
+top_k = 20
+max_new_tokens = 1536
+num_beams = 1
+repetition_penalty = 1.0
+stop = []
+base_seed = 1729
+
+[synthesis]
+required_rollouts = 8
+rollout_text_only = true
+anchor_role = "initial_policy"
+
+[synthesis.prompt]
+path = "prompts/math500/synthesis_cot_v1.txt"
+version = "paper_appendix_f_cot_boxfix_v1"
+prefix = "/no_think\n"
+
+[synthesis.sampling]
+do_sample = true
+temperature = 0.7
+top_p = 0.8
+top_k = 20
+max_new_tokens = 1536
+num_beams = 1
+repetition_penalty = 1.0
+stop = []
+base_seed = 2718
+
+[reward]
+kind = "pseudo_reference_boxed_exact"
+extractor = "last_boxed_string_exact_v1"
+labels_allowed = false
+max_answer_chars = 1000
+invalid_anchor = "fail_closed"
+
+# Local choice matching verl v0.5.0: torch.std uses Bessel correction. The
+# paper writes sigma_G but does not publish ddof, epsilon, or constant-group handling.
+[advantage]
+kind = "group_zscore"
+std_ddof = 1
+epsilon = 1e-6
+zero_variance = "zero_advantages"
+
+[grpo]
+algorithm = "grpo"
+global_batch_size = 256
+batch_size_unit = "prompts"
+learning_rate = 5e-7
+lr_scheduler = "constant"
+warmup_steps = 0
+max_steps = 1000
+kl_placement = "reward"
+kl_coefficient = 1e-3
+clip_epsilon = 0.2
+ppo_epochs = 1
+ppo_mini_batch_size = 256
+normalize_advantages = true
+
+# AdamW is paper-specified. The numerical details below are declared local
+# choices; verl v0.5.0 uses these defaults.
+[optimizer]
+name = "adamw"
+betas = [0.9, 0.999]
+epsilon = 1e-8
+weight_decay = 0.01
+max_grad_norm = 1.0
+
+[checkpointing]
+save_every_steps = 100
+selected_checkpoint = "fixed_final_step"
+resume_mode = "auto"
+max_checkpoints = 3
+
+[runtime]
+framework = "verl"
+framework_release = "0.5.0"
+framework_revision = "8fdc4d3f202f41461f4de9f42a637228e342668b"
+adapter_version = "cat-verl-batch-reward-v1"
+python_executable = "required_absolute_python_from_verl_environment"
+verl_source_path = "required_absolute_verl_checkout"
+model_path = "required_absolute_local_model_snapshot"
+anchor_base_url = "http://127.0.0.1:8001/v1"
+anchor_model = "cat-frozen-qwen3-4b"
+anchor_api_key_env = "CAT_ANCHOR_API_KEY"
+anchor_timeout_seconds = 300
+anchor_max_concurrency = 32
+strategy = "fsdp"
+nodes = 1
+gpus_per_node = 8
+dtype = "bfloat16"
+rollout_engine = "vllm"
+tensor_parallel_size = 2
+gpu_memory_utilization = 0.5
+max_prompt_tokens = 2048
+max_tokens_per_gpu = 16384
+dataloader_workers = 8
+seed = 42
+logger = ["console"]
+download_allowed = false

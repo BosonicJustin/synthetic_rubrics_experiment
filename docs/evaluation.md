@@ -10,10 +10,10 @@ paper’s MATH-500 experiment:
 4. grade raw and synthesis outputs at a separate labels-only boundary; and
 5. report paired synthesis deltas against raw rollout 0 and the raw eight-sample mean.
 
-There is intentionally no real model adapter or model-execution command yet. No
-Transformers, vLLM, provider SDK, checkpoint, or model download is part of this
-repository milestone. The end-to-end path is tested with an injected fake backend,
-and every fake or externally unattested result is permanently marked non-reportable.
+The repository includes a standard-library OpenAI-compatible adapter for an already
+served model. It does not import Transformers or vLLM, load a checkpoint, or download
+weights. Fake, external, and HTTP-endpoint results remain non-reportable unless the
+runtime and checkpoint identity can be attested.
 
 ## Paper contract and explicit local choices
 
@@ -147,20 +147,28 @@ The resulting `requests.jsonl` is the adapter-neutral work queue. Each request i
 keyed by a semantic task ID and includes the fully resolved model contract, message,
 sampling parameters, and deterministic seed.
 
-Once a future real adapter is implemented, it should implement
-`GenerationBackend`, declare every supported sampling field, return outputs keyed by
-both `task_id` and `request_fingerprint`, validate the synthesis input against its
-context window after tokenization, and call the resumable `execute_plan` API. The API
-rejects positional output mix-ups, a changed backend on resume, unsupported `top_k`,
-and any cached result whose request, backend, or output hash changed. An interrupted
-checkpoint can recover only a validated, same-backend, contiguous append-only result
-prefix; gaps or changes to checkpointed results fail closed. Before
+The OpenAI-compatible adapter maps all planned messages and sampling fields and
+returns outputs keyed by both `task_id` and `request_fingerprint`. Serve the exact
+planned model name, then explicitly start or resume execution with:
+
+```bash
+python3 scripts/evaluate_math500.py run-openai \
+  --run-dir outputs/evals/qwen3-4b-raw \
+  --base-url http://127.0.0.1:8000/v1 \
+  --api-key-env CAT_EVAL_API_KEY \
+  --batch-size 16
+```
+
+The API rejects positional output mix-ups, a changed backend on resume, unsupported
+sampling fields, and any cached result whose request, backend, or output hash
+changed. An interrupted run can recover only a validated, same-backend, contiguous
+append-only result prefix; gaps or changes to checkpointed results fail closed. Before
 synthesis planning or scoring, a shared verifier revalidates the complete execution
 against the immutable plan, every per-task result, the result-set fingerprint, the
 canonical generation artifact, the exact backend descriptor, and derived
 reportability reasons; it does not trust a stored `complete` or `non_reportable`
-flag on its own. It is not wired to this milestone’s CLI so there is no accidental
-real-model execution path.
+flag on its own. Execution requires the explicit `run-openai` command and an endpoint
+that the user has started separately.
 
 `reportable: true` means that these provenance and locked-input checks passed. It
 does not promise byte-identical replay of stochastic sampling across runtimes or
@@ -230,8 +238,8 @@ Each line must use this exact schema:
 Coverage must exactly equal the plan. Duplicate, missing, extra, mismatched, or
 mixed-backend rows fail before publication. External ingest remains non-reportable
 because the file alone cannot attest that the declared model, tokenizer, template,
-runtime, and seed behavior produced those bytes. A future real backend adapter is
-the route to reportable execution.
+runtime, and seed behavior produced those bytes. The HTTP adapter is also
+non-reportable because the endpoint cannot prove that identity.
 
 ## Artifact layout
 

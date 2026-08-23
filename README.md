@@ -1,9 +1,9 @@
 # Compute as a Teacher — reproduction
 
 This repository is a reproducible implementation workspace for the experiments in
-*Compute as a Teacher*. The repository now covers two milestones: pinned MATH-500
-acquisition and model-independent infrastructure for raw-rollout and synthesis
-evaluation. RL-synthesis training remains a later milestone.
+*Compute as a Teacher*. It covers pinned MATH-500 acquisition, raw and synthesis
+evaluation, and a reproducible RL-synthesis training pipeline with fixed-checkpoint
+evaluation handoff.
 
 ## Scientific boundary
 
@@ -69,10 +69,10 @@ The notebook keeps reference answers hidden unless you explicitly enable them.
 
 ## Plan raw and synthesis evaluations
 
-The evaluation layer creates deterministic, provider-neutral request queues, ingests
-strictly keyed outputs, resumes atomically per task, and scores only after crossing a
-separate labels boundary. It deliberately includes no real model backend or model-run
-command, so this milestone cannot download or execute a model by itself.
+The evaluation layer creates deterministic, provider-neutral request queues, resumes
+atomically per task, and scores only after crossing a separate labels boundary. A
+small OpenAI-compatible adapter can execute a plan against an already served model;
+it never downloads or loads model weights itself.
 
 Start with the model-free full-dataset planning check:
 
@@ -91,6 +91,25 @@ and adapter version are pinned.
 See [the evaluation guide](docs/evaluation.md) for the raw → synthesis → scoring
 workflow, paper-versus-local protocol choices, artifact schemas, and fake-backend
 tests.
+
+## Plan RL-synthesis training
+
+The training CLI compiles a strict semantic config into a pinned `verl` v0.5.0
+launch plan. It implements eight fresh current-policy rollouts, one frozen-policy
+synthesis call per question, boxed-answer agreement reward, GRPO, reward-level KL,
+and fixed final-checkpoint selection. This command performs a full dataset check
+without resolving or loading a model:
+
+```bash
+python3 scripts/train_math500.py prepare \
+  --config configs/training/math500_cat_grpo.example.toml \
+  --run-dir outputs/training/unused-dry-run \
+  --dry-run
+```
+
+See [the training guide](docs/training.md) for the no-download setup, frozen anchor
+service, safe launch and resume flow, checkpoint export, and trained-model raw and
+synthesis evaluation.
 
 ## Pinned source
 
@@ -118,11 +137,14 @@ rendered image. Preparation preserves that source text exactly.
 ```text
 configs/datasets/math500.lock.json  immutable dataset and artifact contract
 configs/evals/                       paper-profile examples and scoring config
+configs/training/                    CaT GRPO semantic training config
 scripts/prepare_math500.py          clean-clone entry point
-scripts/evaluate_math500.py         model-free evaluation CLI
+scripts/evaluate_math500.py         planning, endpoint execution, and scoring CLI
+scripts/train_math500.py            training plan, launch, and checkpoint CLI
 notebooks/math500_explorer.ipynb    interactive dataset explorer
 src/compute_as_a_teacher/data/      validation, splitting, and safe question loader
 src/compute_as_a_teacher/evaluation/ plans, provenance, grading, and paired metrics
+src/compute_as_a_teacher/training/   rewards, verl bridge, plans, and checkpoints
 prompts/math500/                     versioned and hash-locked prompt contracts
 tests/                              offline unit tests and local-data integrity test
 data/raw/                           ignored immutable upstream bytes
@@ -132,10 +154,10 @@ data/math500/labels.jsonl           ignored evaluation-only labels
 
 ## What comes next
 
-Dataset acquisition is milestone 1; raw and synthesis evaluation infrastructure is
-milestone 2. The next implementation milestone is online RL-synthesis training with
-fresh rollouts. A real, fully attested model backend should be added as a separate
-adapter before any reportable evaluation is run.
+The infrastructure is ready for a separately provisioned model and GPU environment,
+but no training or real-model evaluation has been run in this repository. External
+anchor and inference endpoints remain explicitly non-reportable until their runtime
+and checkpoint identity can be content-attested.
 
 ## Dataset provenance
 

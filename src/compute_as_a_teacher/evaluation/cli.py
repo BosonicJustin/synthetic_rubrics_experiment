@@ -1,4 +1,4 @@
-"""Model-free command line interface for MATH-500 evaluation artifacts."""
+"""Command line interface for MATH-500 evaluation artifacts."""
 
 from __future__ import annotations
 
@@ -13,13 +13,14 @@ from compute_as_a_teacher.data.math500 import (
 )
 
 from .artifacts import read_jsonl
-from .backend import ingest_responses
+from .backend import execute_plan, ingest_responses
 from .config import (
     load_raw_config,
     load_scoring_config,
     load_synthesis_config,
 )
 from .errors import EvaluationError
+from .openai_backend import OpenAICompatibleBackend
 from .planning import (
     GENERATIONS_NAME,
     build_raw_requests,
@@ -195,6 +196,33 @@ def _inspect(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _run_openai(args: argparse.Namespace) -> dict[str, Any]:
+    run_dir = _repo_path(args.run_dir)
+    manifest, requests = load_plan(run_dir)
+    backend = OpenAICompatibleBackend.from_environment(
+        model=requests[0].model,
+        base_url=args.base_url,
+        api_key_env=args.api_key_env,
+        timeout_seconds=args.timeout_seconds,
+        max_workers=args.workers,
+    )
+    execution = execute_plan(
+        run_dir,
+        backend,
+        batch_size=args.batch_size,
+        max_requests=args.max_requests,
+    )
+    return {
+        "mode": "openai_compatible_execution",
+        "kind": manifest["kind"],
+        "complete": execution["complete"],
+        "completed_requests": execution["completed_requests"],
+        "planned_requests": execution["planned_requests"],
+        "reportable": not execution["non_reportable"],
+        "non_reportable_reasons": execution["non_reportable_reasons"],
+    }
+
+
 def _add_force(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--force",
@@ -206,8 +234,7 @@ def _add_force(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Plan, ingest, and score raw/synthesis MATH-500 evaluations. "
-            "This milestone has no command that loads or runs a model."
+            "Plan, execute, ingest, and score raw/synthesis MATH-500 evaluations."
         )
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -266,6 +293,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verify and display a plan without loading labels or a model.",
     )
     inspect.add_argument("--run-dir", type=Path, required=True)
+
+    run_openai = subparsers.add_parser(
+        "run-openai",
+        help="Execute a plan against an already served OpenAI-compatible model.",
+    )
+    run_openai.add_argument("--run-dir", type=Path, required=True)
+    run_openai.add_argument("--base-url", required=True)
+    run_openai.add_argument("--api-key-env", default="")
+    run_openai.add_argument("--timeout-seconds", type=float, default=120.0)
+    run_openai.add_argument("--workers", type=int, default=8)
+    run_openai.add_argument("--batch-size", type=int, default=16)
+    run_openai.add_argument("--max-requests", type=int)
     return parser
 
 
@@ -285,6 +324,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _score(args, "raw")
         elif args.command == "score-synthesis":
             result = _score(args, "synthesis")
+        elif args.command == "run-openai":
+            result = _run_openai(args)
         else:
             result = _inspect(args)
     except (EvaluationError, DatasetPreparationError) as exc:

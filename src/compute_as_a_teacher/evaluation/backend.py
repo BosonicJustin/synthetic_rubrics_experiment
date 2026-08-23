@@ -1,10 +1,4 @@
-"""Backend protocol and resumable execution helpers.
-
-No real model backend is included in this milestone. Tests inject a deterministic
-fake, while external responses can be validated and ingested as non-reportable
-artifacts. A future adapter can implement :class:`GenerationBackend` without
-changing request or scoring schemas.
-"""
+"""Backend protocol and resumable execution helpers."""
 
 from __future__ import annotations
 
@@ -455,7 +449,7 @@ def execute_plan(
     batch_size: int = 16,
     max_requests: int | None = None,
 ) -> dict[str, Any]:
-    """Execute with an injected backend; currently exercised only by tests."""
+    """Execute or resume a planned run with an identity-matched backend."""
 
     if batch_size <= 0:
         raise EvaluationError("batch_size must be positive")

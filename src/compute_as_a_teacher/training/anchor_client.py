@@ -1,0 +1,151 @@
+"""OpenAI-compatible client used by the frozen synthesis anchor."""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+from compute_as_a_teacher.openai_chat import (
+    JsonTransport,
+    OpenAIChatError,
+    OpenAIChatTransport,
+    TransportResponse,
+    api_key_from_environment,
+)
+
+from .errors import RewardContractError
+
+
+class AnchorClientError(RewardContractError):
+    pass
+
+
+class AnchorChatClient(Protocol):
+    def complete(
+        self,
+        *,
+        model: str,
+        message: str,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        max_tokens: int,
+        seed: int,
+    ) -> str:
+        ...
+
+
+def _number(value: Any, name: str, lower: float, upper: float, *, inclusive: bool) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AnchorClientError(f"{name} is outside its supported range")
+    normalized = float(value)
+    lower_ok = normalized >= lower if inclusive else normalized > lower
+    if not math.isfinite(normalized) or not lower_ok or normalized > upper:
+        raise AnchorClientError(f"{name} is outside its supported range")
+    return normalized
+
+
+def _positive_integer(value: Any, name: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise AnchorClientError(f"{name} must be a positive integer")
+    return value
+
+
+def _seed(value: Any) -> int:
+    if type(value) is not int or not 0 <= value < 2**31:
+        raise AnchorClientError("seed must be an integer in [0, 2**31)")
+    return value
+
+
+def _text_response(value: Mapping[str, Any]) -> str:
+    choices = value.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        raise AnchorClientError("anchor response must contain exactly one choice")
+    choice = choices[0]
+    message = choice.get("message") if isinstance(choice, Mapping) else None
+    content = message.get("content") if isinstance(message, Mapping) else None
+    if not isinstance(content, str) or not content.strip():
+        raise AnchorClientError("anchor response must contain one text response")
+    return content
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAIChatCompletionsClient:
+    base_url: str
+    timeout_seconds: float
+    api_key: str | None = None
+    transport: JsonTransport | None = None
+    _client: OpenAIChatTransport = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        kwargs = {
+            "base_url": self.base_url,
+            "timeout_seconds": self.timeout_seconds,
+            "api_key": self.api_key,
+        }
+        if self.transport is not None:
+            kwargs["transport"] = self.transport
+        try:
+            client = OpenAIChatTransport(**kwargs)
+        except OpenAIChatError as exc:
+            raise AnchorClientError(str(exc)) from exc
+        object.__setattr__(self, "_client", client)
+
+    @classmethod
+    def from_environment(
+        cls,
+        *,
+        base_url: str,
+        api_key_env: str,
+        timeout_seconds: float,
+        transport: JsonTransport | None = None,
+    ) -> "OpenAIChatCompletionsClient":
+        try:
+            api_key = api_key_from_environment(api_key_env)
+        except OpenAIChatError as exc:
+            raise AnchorClientError(str(exc)) from exc
+        return cls(base_url, timeout_seconds, api_key, transport)
+
+    @property
+    def endpoint(self) -> str:
+        return self._client.endpoint
+
+    def complete(
+        self,
+        *,
+        model: str,
+        message: str,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        max_tokens: int,
+        seed: int,
+    ) -> str:
+        if not isinstance(model, str) or not model.strip():
+            raise AnchorClientError("anchor model must be nonempty text")
+        if not isinstance(message, str) or not message:
+            raise AnchorClientError("anchor message must be nonempty text")
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": message}],
+            "temperature": _number(temperature, "temperature", 0, 2, inclusive=True),
+            "top_p": _number(top_p, "top_p", 0, 1, inclusive=False),
+            "top_k": _positive_integer(top_k, "top_k"),
+            "max_tokens": _positive_integer(max_tokens, "max_tokens"),
+            "seed": _seed(seed),
+        }
+        try:
+            return _text_response(self._client.post(payload))
+        except OpenAIChatError as exc:
+            raise AnchorClientError(str(exc)) from exc
+
+
+__all__ = [
+    "AnchorChatClient",
+    "AnchorClientError",
+    "JsonTransport",
+    "OpenAIChatCompletionsClient",
+    "TransportResponse",
+]
