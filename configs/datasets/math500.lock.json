@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "dataset": {
+    "repository": "HuggingFaceH4/MATH-500",
+    "configuration": "default",
+    "split": "test",
+    "source_file": "test.jsonl",
+    "requested_revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
+    "resolved_revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
+    "source_url": "https://huggingface.co/datasets/HuggingFaceH4/MATH-500/resolve/6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be/test.jsonl",
+    "dataset_card_url": "https://huggingface.co/datasets/HuggingFaceH4/MATH-500/blob/6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be/README.md",
+    "license": null,
+    "citation": null
+  },
+  "source": {
+    "path": "data/raw/math500-test.jsonl",
+    "sha256": "35dc41080a3680858b27fa7e0533d2d547825316fc5dafe5d316f4ccc5a06132",
+    "bytes": 446564,
+    "rows": 500,
+    "columns": {
+      "problem": "string",
+      "solution": "string",
+      "answer": "string",
+      "subject": "string",
+      "level": "integer",
+      "unique_id": "string"
+    }
+  },
+  "serialization": {
+    "format": "jsonl",
+    "encoding": "utf-8",
+    "line_ending": "LF",
+    "json_keys": "sorted",
+    "json_separators": [",", ":"],
+    "terminal_newline": true,
+    "record_order": "upstream source order",
+    "text_transform": "none",
+    "id_transform": "math500- + first 16 lowercase hex characters of SHA-256(upstream unique_id UTF-8 bytes)"
+  },
+  "outputs": {
+    "questions": {
+      "path": "data/math500/questions.jsonl",
+      "rows": 500,
+      "bytes": 124398,
+      "sha256": "f0a73e8f8f397a10dc306cc8bf5fe97b8ed47c31d1b73b6c653491e2b79be7e4",
+      "keys": ["id", "problem"]
+    },
+    "labels": {
+      "path": "data/math500/labels.jsonl",
+      "rows": 500,
+      "bytes": 328662,
+      "sha256": "d8a7aabdcab8b4e18de36a7de161dbab9eac5225e69ba55d0852b3531f412c84",
+      "keys": ["id", "answer", "solution", "subject", "level"]
+    }
+  },
+  "statistics": {
+    "subjects": {
+      "Algebra": 124,
+      "Counting & Probability": 38,
+      "Geometry": 41,
+      "Intermediate Algebra": 97,
+      "Number Theory": 62,
+      "Prealgebra": 82,
+      "Precalculus": 56
+    },
+    "levels": {
+      "1": 43,
+      "2": 90,
+      "3": 105,
+      "4": 128,
+      "5": 134
+    },
+    "asymptote_problem_count": 42
+  },
+  "label_firewall": {
+    "training_input": "data/math500/questions.jsonl",
+    "training_keys": ["id", "problem"],
+    "evaluation_labels": "data/math500/labels.jsonl",
+    "forbidden_training_keys": ["answer", "solution", "subject", "level"]
+  }
+}

@@ -1,0 +1,23 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# The paper is kept locally for reference, not redistributed by this repo.
+/compute_as_a_teacher.pdf
+
+# Recreated by scripts/prepare_math500.py from the pinned upstream snapshot.
+/data/raw/*
+!/data/raw/.gitkeep
+/data/math500/*
+!/data/math500/.gitkeep
+
+# Future experiment artifacts.
+/checkpoints/
+/logs/
+/outputs/
+/rollouts/
+/wandb/

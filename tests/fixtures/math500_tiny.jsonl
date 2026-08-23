@@ -1,0 +1,2 @@
+{"problem":"If x + 1 = 2, find x.","solution":"Subtract 1 from both sides, so x = 1.","answer":"1","subject":"Algebra","level":1,"unique_id":"fixture/algebra/1.json"}
+{"problem":"How many sides does a triangle have?","solution":"By definition, a triangle has three sides.","answer":"3","subject":"Geometry","level":1,"unique_id":"fixture/geometry/2.json"}
