@@ -26,6 +26,7 @@ from .planning import (
     build_raw_requests,
     build_synthesis_requests,
     load_plan,
+    validate_synthesis_anchor_relation,
     write_raw_plan,
     write_synthesis_plan,
 )
@@ -104,7 +105,7 @@ def _synthesis_plan(args: argparse.Namespace) -> dict[str, Any]:
             raw_requests,
         )
         requests = build_synthesis_requests(raw_generations, config, template)
-        same_anchor = all(request.model == config.anchor for request in raw_requests)
+        validate_synthesis_anchor_relation(config, raw_requests)
         return {
             "mode": "dry_run",
             "kind": "synthesis",
@@ -115,7 +116,8 @@ def _synthesis_plan(args: argparse.Namespace) -> dict[str, Any]:
             "problems": len(requests),
             "raw_rollouts_consumed": len(raw_generations),
             "synthesis_requests": len(requests),
-            "same_frozen_anchor": same_anchor,
+            "anchor_relation": config.anchor_relation,
+            "anchor_relation_satisfied": True,
             "model_runnable": not config.anchor.unresolved_reasons(),
             "unresolved_model_reasons": list(config.anchor.unresolved_reasons()),
         }

@@ -5,24 +5,19 @@ on:
   pull_request:
 
 jobs:
-  offline-contracts:
+  reproducibility-contracts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m unittest discover -s tests/evaluation -v
-      - run: python -m unittest discover -s tests/training -v
-      - run: python -m unittest tests.test_notebook -v
-
-  dataset-reproduction:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: python scripts/prepare_math500.py
-      - run: python scripts/prepare_math500.py --verify-only
-      - run: python -m unittest tests.test_math500 -v
+      - run: python -m pip install uv==0.11.21
+      - run: uv lock --check
+      - run: uv sync --extra evaluation --frozen
+      - run: uv run --extra evaluation --frozen python scripts/prepare_math500.py
+      - run: uv run --extra evaluation --frozen python scripts/prepare_math500.py --verify-only
+      - run: uv run --extra evaluation --frozen python -m unittest tests.test_math500 -v
+      - run: uv run --extra evaluation --frozen python -m unittest discover -s tests/evaluation -v
+      - run: uv run --extra evaluation --frozen python -m unittest discover -s tests/training -v
+      - run: uv run --extra evaluation --frozen python -m unittest tests.test_notebook -v

@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 
 
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+SUPPORTED_FINISH_REASONS = frozenset({"stop", "length"})
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
@@ -188,6 +189,7 @@ __all__ = [
     "JsonTransport",
     "OpenAIChatError",
     "OpenAIChatTransport",
+    "SUPPORTED_FINISH_REASONS",
     "TransportResponse",
     "api_key_from_environment",
     "chat_endpoint",

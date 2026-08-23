@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Sequence
 
+from compute_as_a_teacher.openai_chat import SUPPORTED_FINISH_REASONS
+
 from .artifacts import canonical_json_bytes, sha256_bytes, sha256_text
 from .errors import EvaluationError
 
@@ -47,6 +49,12 @@ def _exact_keys(value: Mapping[str, Any], expected: set[str], name: str) -> None
 def _nonempty_string(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise EvaluationError(f"{name} must be a nonempty string")
+    return value
+
+
+def _finish_reason(value: Any, name: str) -> str:
+    if value not in SUPPORTED_FINISH_REASONS:
+        raise EvaluationError(f"{name} is unsupported")
     return value
 
 
@@ -561,7 +569,7 @@ class GenerationResult:
             ),
             text=value["text"],
             output_sha256=output_sha256,
-            finish_reason=_nonempty_string(value["finish_reason"], "finish_reason"),
+            finish_reason=_finish_reason(value["finish_reason"], "finish_reason"),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             provider_metadata=dict(metadata),
@@ -644,7 +652,7 @@ def validate_and_order_generations(
             row["backend_fingerprint"],
             f"generation {request.task_id}.backend_fingerprint",
         )
-        _nonempty_string(
+        _finish_reason(
             row["finish_reason"], f"generation {request.task_id}.finish_reason"
         )
         usage = _mapping(row["usage"], f"generation {request.task_id}.usage")

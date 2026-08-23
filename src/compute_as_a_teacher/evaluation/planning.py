@@ -26,6 +26,7 @@ from .artifacts import (
 from .config import (
     MATH500_PROTOCOL_VERSION,
     RawEvalConfig,
+    SYNTHESIS_ANCHOR_RELATIONS,
     SynthesisEvalConfig,
 )
 from .errors import EvaluationError
@@ -51,7 +52,7 @@ REQUESTS_NAME = "requests.jsonl"
 GENERATIONS_NAME = "generations.jsonl"
 EXECUTION_NAME = "execution.json"
 RAW_PROMPT_VERSION = "raw_math500_local_v1"
-SYNTHESIS_PROMPT_VERSION = "paper_appendix_f_cot_boxfix_v1"
+SYNTHESIS_PROMPT_VERSION = "paper_appendix_f_cot_literal_v1"
 
 
 def derive_seed(base_seed: int, question_id: str, model_role: str, index: int) -> int:
@@ -112,14 +113,16 @@ def _validate_synthesis_contract(
     *,
     require_resolved_model: bool,
 ) -> None:
+    if config.schema_version != 2 or config.kind != "synthesis":
+        raise EvaluationError("Synthesis config must use schema version 2")
     if config.protocol_version != MATH500_PROTOCOL_VERSION:
         raise EvaluationError(
             "Synthesis config does not use the registered paper protocol"
         )
     if type(config.required_rollouts) is not int or config.required_rollouts != 8:
         raise EvaluationError("Synthesis planning requires exactly eight rollouts")
-    if config.require_same_model_as_raw is not True:
-        raise EvaluationError("Synthesis must use the same frozen model as raw rollout generation")
+    if config.anchor_relation not in SYNTHESIS_ANCHOR_RELATIONS:
+        raise EvaluationError("Synthesis config has an invalid anchor relation")
     if config.prompt.version != SYNTHESIS_PROMPT_VERSION:
         raise EvaluationError(
             f"Synthesis planning requires prompt {SYNTHESIS_PROMPT_VERSION}"
@@ -390,7 +393,9 @@ def _plan_manifest(
                 "rollout_index_0" if kind == "raw" else None
             ),
             "synthesis_receives_rollout_text_only": kind == "synthesis",
-            "same_frozen_anchor": kind == "synthesis",
+            "synthesis_anchor_relation": (
+                config.get("anchor_relation") if kind == "synthesis" else None
+            ),
         },
     }
     manifest_without_fingerprint["plan_fingerprint"] = sha256_bytes(
@@ -501,10 +506,7 @@ def write_synthesis_plan(
     raw_manifest, raw_requests = load_plan(raw_run_dir, expected_kind="raw")
     if raw_manifest["protocol_version"] != config.protocol_version:
         raise EvaluationError("Raw and synthesis protocol versions must match")
-    if any(request.model != config.anchor for request in raw_requests):
-        raise EvaluationError(
-            "Synthesis anchor must exactly match every frozen raw-policy request"
-        )
+    validate_synthesis_anchor_relation(config, raw_requests)
     raw_sampling = dict(raw_manifest["config"]["sampling"])
     synthesis_sampling = config.sampling.to_dict()
     raw_sampling.pop("base_seed", None)
@@ -560,6 +562,20 @@ def write_synthesis_plan(
     publish_bytes(run_dir / REQUESTS_NAME, requests_payload, force=force)
     publish_bytes(run_dir / MANIFEST_NAME, manifest_payload, force=force)
     return manifest
+
+
+def validate_synthesis_anchor_relation(
+    config: SynthesisEvalConfig,
+    raw_requests: Sequence[GenerationRequest],
+) -> bool:
+    same_anchor = all(request.model == config.anchor for request in raw_requests)
+    if config.anchor_relation == "same_as_raw" and not same_anchor:
+        raise EvaluationError("same_as_raw synthesis requires the exact raw policy")
+    if config.anchor_relation == "frozen_initial_for_trained_raw" and same_anchor:
+        raise EvaluationError(
+            "trained-policy synthesis requires a distinct frozen initial-policy anchor"
+        )
+    return same_anchor
 
 
 def _validate_manifest(
@@ -650,7 +666,7 @@ def load_plan(
             "protocol_version",
             "run_name",
             "required_rollouts",
-            "require_same_model_as_raw",
+            "anchor_relation",
             "prompt",
             "anchor",
             "sampling",
@@ -659,8 +675,9 @@ def load_plan(
     if set(config_value) != expected_config_keys:
         raise EvaluationError("Plan contains an invalid embedded config schema")
     model_key = "model" if kind == "raw" else "anchor"
+    config_schema_version = 1 if kind == "raw" else 2
     if (
-        config_value.get("schema_version") != 1
+        config_value.get("schema_version") != config_schema_version
         or config_value.get("kind") != kind
         or config_value.get("protocol_version") != manifest["protocol_version"]
         or config_value.get("run_name") != manifest["run_name"]
@@ -670,10 +687,31 @@ def load_plan(
     if kind == "raw" and config_value.get("rollouts_per_problem") != 8:
         raise EvaluationError("Embedded raw config does not require eight rollouts")
     if kind == "synthesis" and (
-        config_value.get("required_rollouts") != 8
-        or config_value.get("require_same_model_as_raw") is not True
+        config_value.get("schema_version") != 2
+        or config_value.get("required_rollouts") != 8
+        or config_value.get("anchor_relation") not in SYNTHESIS_ANCHOR_RELATIONS
     ):
         raise EvaluationError("Embedded synthesis config violates the paper contract")
+    paper_contract = manifest.get("paper_contract")
+    if not isinstance(paper_contract, dict) or set(paper_contract) != {
+        "rollouts_per_problem",
+        "raw_primary_protocol_decision",
+        "synthesis_receives_rollout_text_only",
+        "synthesis_anchor_relation",
+    }:
+        raise EvaluationError("Plan contains an invalid paper-contract schema")
+    expected_relation = (
+        config_value.get("anchor_relation") if kind == "synthesis" else None
+    )
+    if (
+        paper_contract.get("rollouts_per_problem") != 8
+        or paper_contract.get("raw_primary_protocol_decision")
+        != ("rollout_index_0" if kind == "raw" else None)
+        or paper_contract.get("synthesis_receives_rollout_text_only")
+        is not (kind == "synthesis")
+        or paper_contract.get("synthesis_anchor_relation") != expected_relation
+    ):
+        raise EvaluationError("Plan paper contract does not match its config")
     embedded_prompt = config_value.get("prompt")
     if (
         not isinstance(embedded_prompt, dict)

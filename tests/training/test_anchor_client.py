@@ -49,9 +49,11 @@ class OpenAIChatCompletionsClientTests(unittest.TestCase):
                 status_code=200,
                 body={
                     "id": "answer-1",
+                    "model": "frozen-anchor",
                     "choices": [
                         {
                             "index": 0,
+                            "finish_reason": "stop",
                             "message": {
                                 "role": "assistant",
                                 "content": r"synthesis \boxed{42}",
@@ -100,11 +102,54 @@ class OpenAIChatCompletionsClientTests(unittest.TestCase):
             "Bearer local-test-key",
         )
 
+    def test_accepts_a_length_limited_text_response(self) -> None:
+        transport = RecordingTransport(
+            TransportResponse(
+                200,
+                {
+                    "model": "anchor",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "length",
+                            "message": {"content": r"\boxed{1}"},
+                        }
+                    ],
+                },
+            )
+        )
+        client = OpenAIChatCompletionsClient(
+            base_url="http://127.0.0.1:8000/v1",
+            timeout_seconds=5,
+            transport=transport,
+        )
+        self.assertEqual(
+            client.complete(
+                model="anchor",
+                message="prompt",
+                temperature=0.7,
+                top_p=0.8,
+                top_k=20,
+                max_tokens=1536,
+                seed=1,
+            ),
+            r"\boxed{1}",
+        )
+
     def test_environment_key_is_read_at_construction_not_stored_by_name(self) -> None:
         transport = RecordingTransport(
             TransportResponse(
                 200,
-                {"choices": [{"message": {"content": r"\boxed{1}"}}]},
+                {
+                    "model": "anchor",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"content": r"\boxed{1}"},
+                        }
+                    ],
+                },
             )
         )
         with patch.dict(os.environ, {"CAT_ANCHOR_TEST_KEY": "secret"}, clear=False):
@@ -126,7 +171,16 @@ class OpenAIChatCompletionsClientTests(unittest.TestCase):
     def test_invalid_endpoints_fail_before_transport(self) -> None:
         response = TransportResponse(
             200,
-            {"choices": [{"message": {"content": r"\boxed{1}"}}]},
+            {
+                "model": "anchor",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"content": r"\boxed{1}"},
+                    }
+                ],
+            },
         )
         for endpoint in (
             "anchor.example/v1",
@@ -149,18 +203,45 @@ class OpenAIChatCompletionsClientTests(unittest.TestCase):
         bad_responses = (
             TransportResponse(500, {"choices": [{"message": {"content": "x"}}]}),
             TransportResponse(200, b"not json"),
-            TransportResponse(200, {"choices": []}),
+            TransportResponse(200, {"model": "anchor", "choices": []}),
             TransportResponse(
                 200,
                 {
+                    "model": "anchor",
                     "choices": [
-                        {"message": {"content": "first"}},
-                        {"message": {"content": "second"}},
+                        {"index": 0, "finish_reason": "stop", "message": {"content": "first"}},
+                        {"index": 1, "finish_reason": "stop", "message": {"content": "second"}},
                     ]
                 },
             ),
-            TransportResponse(200, {"choices": [{"message": {"content": None}}]}),
-            TransportResponse(200, {"choices": [{"message": {"content": "  "}}]}),
+            TransportResponse(
+                200,
+                {
+                    "model": "anchor",
+                    "choices": [{"index": 0, "finish_reason": "stop", "message": {"content": None}}],
+                },
+            ),
+            TransportResponse(
+                200,
+                {
+                    "model": "anchor",
+                    "choices": [{"index": 0, "finish_reason": "stop", "message": {"content": "  "}}],
+                },
+            ),
+            TransportResponse(
+                200,
+                {
+                    "model": "wrong-anchor",
+                    "choices": [{"index": 0, "finish_reason": "stop", "message": {"content": r"\boxed{1}"}}],
+                },
+            ),
+            TransportResponse(
+                200,
+                {
+                    "model": "anchor",
+                    "choices": [{"index": 0, "finish_reason": "content_filter", "message": {"content": r"\boxed{1}"}}],
+                },
+            ),
         )
         for response in bad_responses:
             with self.subTest(response=response):

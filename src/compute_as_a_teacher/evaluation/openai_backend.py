@@ -11,9 +11,11 @@ from compute_as_a_teacher.openai_chat import (
     JsonTransport,
     OpenAIChatError,
     OpenAIChatTransport,
+    SUPPORTED_FINISH_REASONS,
     api_key_from_environment,
 )
 
+from .artifacts import sha256_text
 from .backend import BackendDescriptor
 from .errors import EvaluationError
 from .schemas import BackendOutput, GenerationRequest, ModelSpec
@@ -88,7 +90,10 @@ class OpenAICompatibleBackend:
             "_descriptor",
             BackendDescriptor(
                 name=BACKEND_NAME,
-                version=BACKEND_VERSION,
+                version=(
+                    f"{BACKEND_VERSION}+endpoint-sha256-"
+                    f"{sha256_text(client.endpoint)}"
+                ),
                 model=self.model,
                 supported_sampling_fields=SUPPORTED_SAMPLING_FIELDS,
                 non_reportable=True,
@@ -154,8 +159,8 @@ class OpenAICompatibleBackend:
         if not isinstance(content, str):
             raise OpenAIBackendError("response choice must contain text content")
         finish_reason = choice.get("finish_reason")
-        if not isinstance(finish_reason, str) or not finish_reason:
-            raise OpenAIBackendError("response finish_reason must be nonempty text")
+        if finish_reason not in SUPPORTED_FINISH_REASONS:
+            raise OpenAIBackendError("response has an unsupported finish_reason")
         usage = response.get("usage")
         if usage is None:
             usage = {}

@@ -1,9 +1,10 @@
 # MATH-500 RL-synthesis training
 
-This pipeline reproduces the paper's reference-free MATH-500 training loop on top
-of a pinned `verl` batch-reward interface. The repository prepares and verifies the
-run, but it does not download a model, install a GPU stack, start a server, or run
-training automatically.
+This pipeline implements paper-aligned planning and contracts for the reference-free
+MATH-500 loop on a pinned `verl` batch-reward interface. It does not download a
+model, install or attest a GPU stack, start a server, or claim that training has run.
+Complete every gate in the [experiment plan](experiment_plan.md) before launching
+the canonical 1,000-step job.
 
 ## Protocol boundary
 
@@ -17,20 +18,36 @@ For each update, the implementation:
 4. lets `verl` compute GRPO group advantages and update only the current policy,
    with reward-level KL regularization against the initial policy.
 
-The registered paper profile fixes a prompt batch of 256, group size 8, learning
-rate `5e-7`, constant schedule with no warmup, KL coefficient `1e-3`, 1,000 updates,
-1,536 generated tokens, AdamW, FSDP, and eight GPUs. Qwen3-4B sampling uses
-temperature `0.7`, top-p `0.8`, top-k `20`, and `/no_think`.
+The registered profile interprets the paper's global batch size 256 as prompts and
+fixes group size 8, learning rate `5e-7`, constant schedule with no warmup, KL
+coefficient `1e-3`, 1,000 updates, 1,536 generated tokens, AdamW, FSDP, and eight
+GPUs. Qwen3-4B sampling uses temperature `0.7`, top-p `0.8`, top-k `20`, and
+`/no_think`. The actor loss is pinned to sequence-mean/token-mean aggregation,
+matching Eq. 6's token mean within each response followed by the group mean.
 
 Several implementation details are not reported by the paper. This repository
 declares them as local choices: `verl` v0.5.0 at commit
 [`8fdc4d3f202f41461f4de9f42a637228e342668b`](https://github.com/verl-project/verl/commit/8fdc4d3f202f41461f4de9f42a637228e342668b),
 sample standard deviation (`ddof=1`) with epsilon `1e-6`, zero advantages for a
 constant-reward group, PPO clip `0.2`, one PPO epoch, mini-batch size 256 sequences,
-AdamW defaults recorded in the config, checkpointing every 100 steps, and selection
-of the fixed step-1,000 checkpoint. The raw problem prompt, synthesis delimiters,
-base seeds, exact boxed-string extractor, model registry identity, and repaired
-Appendix F prompt are also versioned local choices.
+sampled-token `kl` penalty with a fixed controller, AdamW defaults recorded in the
+config, checkpointing every 100 steps, and selection of the fixed step-1,000
+checkpoint. The raw problem prompt, synthesis delimiters, base seeds, registered
+boxed-string extractor, model registry identity, `do_sample=true`, single-beam
+generation, repetition penalty `1.0`, and no stop strings are also versioned local
+choices. The pinned Verl rollout and anchor adapters rely on their defaults for the
+last three fields where the paper publishes no setting. The
+canonical synthesis body is the displayed Appendix F text, including its
+`$ boxed{answer}$` wording; the registered one-backslash repair is excluded from
+this protocol. Both training and evaluation accept only `stop` and `length` finish
+reasons and use the same 50,000-character boxed-answer safety cap. Target-runtime
+qualification must confirm the generation defaults remain unchanged.
+Appendix I does not publish its extraction regex, so the balanced-brace,
+last-`\\boxed` scanner is a disclosed local approximation. The exact Appendix F
+ending may itself produce unextractable `boxed{...}` text without a slash; canonical
+training fails closed, while the repaired prompt is reserved for a new sensitivity
+protocol. Target preflight also verifies from the pinned Verl source that the FSDP
+actor constructs AdamW.
 
 The older `verl` revision is intentional. Its
 [`BatchRewardManager`](https://github.com/verl-project/verl/blob/8fdc4d3f202f41461f4de9f42a637228e342668b/verl/workers/reward_manager/batch.py)
@@ -63,12 +80,36 @@ git -C /abs/path/to/verl checkout 8fdc4d3f202f41461f4de9f42a637228e342668b
 git -C /abs/path/to/verl rev-parse HEAD
 ```
 
+Discover the local identities without downloading or loading tensors:
+
+```bash
+export CAT_MODEL_REVISION='REPLACE_WITH_FULL_COMMIT_SHA'
+python3 scripts/train_math500.py model-identity \
+  --model-path "/abs/path/to/snapshots/$CAT_MODEL_REVISION"
+
+export CAT_TRAINER_IMAGE_DIGEST='sha256:replace-with-64-hex-image-digest'
+python3 scripts/train_math500.py runtime-identity \
+  --python /abs/path/to/verl-environment/bin/python \
+  --verl-source /abs/path/to/verl
+```
+
 Copy `configs/training/math500_cat_grpo.example.toml` and replace every
-`required_*` field. Pin the full model and tokenizer commit SHAs and the SHA-256 of
-the exact raw chat-template source. `policy` and `anchor.model` must be identical.
+`required_*` field. The model and tokenizer revisions must be the same full commit
+SHA, and `runtime.model_path` must end in that exact SHA. Pin the raw chat-template
+SHA-256, full snapshot-tree SHA-256, trainer image digest, and target package-
+inventory SHA-256 reported by the identity commands. `model-identity` prints the
+snapshot revision, chat-template SHA-256, and tree SHA-256. It rejects directory
+symlinks inside the resolved snapshot tree; ordinary file symlinks in a Hugging Face
+snapshot are followed and their contents are hashed. `policy` and `anchor.model`
+must be identical.
+
 Set absolute paths for `runtime.python_executable`, `runtime.verl_source_path`, and
-`runtime.model_path`. Keep `runtime.download_allowed = false`; launch also exports
-`HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`.
+`runtime.model_path`. Obtain the immutable container-image digest from the
+orchestrator or container metadata and set `CAT_TRAINER_IMAGE_DIGEST` yourself;
+`runtime-identity` records that caller-supplied digest and the discovered package
+inventory, but does not discover an image digest. Keep
+`runtime.download_allowed = false`; launch also exports `HF_HUB_OFFLINE=1` and
+`TRANSFORMERS_OFFLINE=1`.
 
 ## Frozen anchor service
 
@@ -82,7 +123,9 @@ One possible local vLLM launch is:
 
 ```bash
 export CAT_ANCHOR_API_KEY='replace-with-a-local-secret'
-vllm serve /abs/path/to/qwen3-4b-snapshot \
+export CAT_ANCHOR_GPU_ID='REPLACE_WITH_ANCHOR_ONLY_DEVICE'
+CUDA_VISIBLE_DEVICES="$CAT_ANCHOR_GPU_ID" vllm serve \
+  "/abs/path/to/snapshots/$CAT_MODEL_REVISION" \
   --served-model-name cat-frozen-qwen3-4b \
   --host 127.0.0.1 --port 8001 \
   --api-key "$CAT_ANCHOR_API_KEY"
@@ -91,7 +134,9 @@ vllm serve /abs/path/to/qwen3-4b-snapshot \
 Keep the service name, endpoint, and API-key environment-variable name aligned with
 the training config. Verify that the server honors `top_k`, `seed`, and the same
 tokenizer/chat template. An invalid or unavailable anchor fails the reward batch
-closed; gold answers are not a fallback.
+closed; gold answers are not a fallback. The trainer must see exactly eight separate
+H100s, none visible to the anchor. If there is no ninth local GPU, serve the anchor
+on another host or otherwise isolated hardware and update `runtime.anchor_base_url`.
 
 ## Prepare and launch
 
@@ -114,6 +159,10 @@ The offline contract tests also use no model or GPU:
 python3 -m unittest discover -s tests/training -v
 ```
 
+The registered config remains the canonical 256-prompt, eight-GPU, 1,000-step run.
+Qualification commands derive constrained, non-reportable plans from it without
+weakening the canonical contract.
+
 With a resolved config, write and verify an immutable plan:
 
 ```bash
@@ -125,9 +174,134 @@ python3 scripts/train_math500.py inspect \
   --run-dir outputs/training/math500-cat
 ```
 
-The plan contains the label-free `math500_train.jsonl`, exact `verl` argv and
-environment, and hashes of the prompt and Python source tree. Later commands refuse
-changed live code or prompts. Launch is a safe preflight by default:
+The canonical plan contains the label-free `math500_train.jsonl`, exact `verl` argv
+and environment, and hashes of the prompt and Python source tree. Later commands
+refuse changed live code or prompts. Training and qualification plan writers use the
+same advisory locks as launch, and execution reloads each plan only after acquiring
+those locks, so `--force` cannot replace a live job's artifacts.
+
+Before executing the initial raw baseline or creating trainer results, logs,
+rollout records, or checkpoints, bind its plan, the intended initial synthesis
+config, and the canonical training plan into a single preregistration:
+
+```bash
+python3 scripts/train_math500.py preregister-experiment \
+  --output outputs/experiment/math500-preregistration.json \
+  --initial-raw-run-dir outputs/evals/math500-initial-raw \
+  --initial-synthesis-config configs/evals/math500_synthesis.toml \
+  --training-run-dir outputs/training/math500-cat
+```
+
+Run this only after `plan-raw` has created the initial raw plan and `prepare` has
+created the canonical training plan, but before either directory contains results,
+logs, rollout records, or checkpoints. It rejects drift in the dataset, `pi_0`,
+prompt bytes and contracts, sampling and seeds, group size, label firewall, or fixed
+step-1,000 selection. The registered initial synthesis config must use
+`anchor_relation = "same_as_raw"`; the later trained synthesis plan must use the
+frozen-`pi_0` relation generated by `plan-trained-eval`.
+
+In the target environment, record the immutable trainer image and run the complete
+operational preflight before any trainer/Verl job. The frozen anchor service must
+already be running for its canaries:
+
+```bash
+export CAT_TRAINER_IMAGE_DIGEST='sha256:replace-with-64-hex-image-digest'
+python3 scripts/train_math500.py preflight \
+  --config configs/training/math500_cat_grpo.toml \
+  --run-dir outputs/training/math500-cat \
+  --hash-model \
+  --check-anchor \
+  --write
+```
+
+This rehashes the snapshot against the config pin; validates Qwen safetensors headers,
+shard indexes, BF16 tensor storage/no-quantization config, tokenizer assets, and chat template;
+checks separate policy and worst-case eight-rollout synthesis context budgets;
+tokenizes all 500 prompts; and composes the real Hydra job. It also requires the
+exact pinned package inventory and trainer image, imports the repository dataset and
+reward hooks from their expected paths, checks the reward signature, inventories
+eight BF16 H100s, and enforces the configured free-memory floor before sending a
+short semantic anchor canary and an exact-tokenized long-context canary whose boxed
+nonce appears only near the tail. This verifies request acceptance and preservation
+of that unique late value, not the endpoint's hidden truncation implementation. Omit
+`--check-anchor` or `--hash-model` only for diagnosis;
+such a receipt is not operationally launch-ready. Files and safetensors metadata are
+read for hashing and validation, but tensors are not loaded and downloads remain
+disabled.
+
+Operational readiness is not scientific endpoint attestation. An HTTP model alias
+cannot prove the anchor serves the pinned `pi_0` weights or uses disjoint hardware;
+the launch attestation requires those external facts. Current execution schemas
+nevertheless remain scientifically non-reportable. A reportable run requires a new
+versioned, attested backend and schema.
+
+Before the canonical launch, derive, inspect, and preview the one-step smoke in its
+own directory:
+
+```bash
+python3 scripts/train_math500.py prepare-qualification \
+  --run-dir outputs/training/math500-cat \
+  --qualification-dir outputs/training/math500-cat-one-step \
+  --profile one_step
+
+python3 scripts/train_math500.py inspect-qualification \
+  --qualification-dir outputs/training/math500-cat-one-step
+
+python3 scripts/train_math500.py launch-qualification \
+  --config configs/training/math500_cat_grpo.toml \
+  --qualification-dir outputs/training/math500-cat-one-step
+```
+
+Repeat with separate directories for `resume_three_step` and
+`full_shape_five_step`. These plans are label-free, fingerprinted to the canonical
+plan, and hard non-reportable. The launch command is a preview unless `--execute` is
+added; use `--execute` only inside the provisioned GPU environment.
+
+After all three profiles reach their terminal checkpoints, copy
+`configs/training/math500_launch_attestation.example.json` outside every run
+directory. Replace every placeholder and false/zero limit with reviewed evidence
+and numeric ceilings derived from the full-shape qualification. The total-cost cap
+must cover the declared trainer and anchor GPU-hour ceilings at their recorded rates,
+plus storage and network cost. These values are approval metadata; configure the
+actual scheduler/provider wall-time, spend, and storage controls separately. First
+compute the exact evidence fingerprint:
+
+```bash
+python3 scripts/train_math500.py inspect-launch-evidence \
+  --preregistration outputs/experiment/math500-preregistration.json \
+  --training-run-dir outputs/training/math500-cat \
+  --one-step-dir outputs/training/math500-cat-one-step \
+  --resume-three-step-dir outputs/training/math500-cat-resume-three-step \
+  --full-shape-five-step-dir outputs/training/math500-cat-full-shape-five-step
+```
+
+Paste that value into `reviewed_evidence_fingerprint`, review exactly those
+artifacts, and bind the attestation, qualification receipts, logs, rollout records,
+and checkpoints into one approval. Keep the approval output outside every bound
+training, qualification, and initial-raw run directory, and do not reuse a bound
+source-config path:
+
+```bash
+python3 scripts/train_math500.py write-launch-approval \
+  --output outputs/experiment/math500-launch-approval.json \
+  --preregistration outputs/experiment/math500-preregistration.json \
+  --training-run-dir outputs/training/math500-cat \
+  --one-step-dir outputs/training/math500-cat-one-step \
+  --resume-three-step-dir outputs/training/math500-cat-resume-three-step \
+  --full-shape-five-step-dir outputs/training/math500-cat-full-shape-five-step \
+  --manual-attestation outputs/experiment/math500-launch-attestation.json
+
+python3 scripts/train_math500.py inspect-launch-approval \
+  --launch-approval outputs/experiment/math500-launch-approval.json \
+  --preregistration outputs/experiment/math500-preregistration.json \
+  --training-run-dir outputs/training/math500-cat
+```
+
+This gate verifies evidence integrity; it cannot independently prove operator
+attestations about endpoint weights, hardware separation, or reviewed metrics. It
+refuses evidence from a qualification directory with a live launch lock.
+
+Canonical launch is a safe preview by default:
 
 ```bash
 python3 scripts/train_math500.py launch \
@@ -136,15 +310,22 @@ python3 scripts/train_math500.py launch \
 ```
 
 It prints the command without executing it. Only the explicit form starts the GPU
-job, after checking the Python executable, local model directory, config/plan match,
-offline policy, and exact `verl` Git revision:
+job. The explicit form reruns every complete operational gate and refuses a dirty or
+wrong `verl` checkout, a changed checkpoint/tokenizer, an incompatible topology,
+failed Hydra composition, an overlong prompt, or a failed frozen-anchor canary:
 
 ```bash
 python3 scripts/train_math500.py launch \
   --config configs/training/math500_cat_grpo.toml \
   --run-dir outputs/training/math500-cat \
+  --preregistration outputs/experiment/math500-preregistration.json \
+  --launch-approval outputs/experiment/math500-launch-approval.json \
   --execute
 ```
+
+One run-directory lock spans the final preflight receipt, trainer process group, and
+terminal-checkpoint verification. Cleanup terminates same-group workers before that
+lock is released.
 
 ## Resume and fixed checkpoint
 
@@ -152,7 +333,8 @@ python3 scripts/train_math500.py launch \
 make relaunching the same resolved config and run directory resume from the latest
 valid `verl` checkpoint. Do not re-plan after checkpoints or other descendants
 exist. Inspect the plan, restart the frozen anchor from the same initial snapshot,
-then rerun `launch --execute`.
+then rerun `launch --execute` with the same preregistration and launch-approval
+arguments. The approval is reverified against its current evidence on every start.
 
 The protocol does not use labels for early stopping or checkpoint selection. A run
 is complete only when `latest_checkpointed_iteration.txt` records step 1,000. Ask
@@ -179,8 +361,8 @@ the actor checkpoint and merged export, and records fixed-step, label-free linea
 
 ## Evaluate the trained export
 
-Create raw and inference-time-synthesis configs bound to the registered export
-hash:
+Create a raw config bound to the registered `pi_T` export hash and a synthesis
+config bound to the frozen initial-policy (`pi_0`) identity:
 
 ```bash
 python3 scripts/train_math500.py plan-trained-eval \
@@ -190,7 +372,9 @@ python3 scripts/train_math500.py plan-trained-eval \
 ```
 
 Serve `exports/global_step_1000` under that exact model name with an
-OpenAI-compatible server. For example:
+OpenAI-compatible server. Keep the frozen `pi_0` anchor service from training
+available at its separately configured URL and model name. For example, serve
+`pi_T` with:
 
 ```bash
 export CAT_EVAL_API_KEY='replace-with-a-local-secret'
@@ -222,8 +406,11 @@ python3 scripts/evaluate_math500.py run-openai \
 ```
 
 Use `--max-requests` for a small smoke test; rerunning the same command resumes from
-validated per-task results. Once raw execution is complete, run synthesis and the
-separate labels-only scoring boundary:
+validated per-task results. The runner binds the run to a hash of the normalized
+chat-completions URL without storing the URL or API key, so switching endpoints
+fails resume validation. Once raw execution is complete, plan synthesis, execute it
+against the frozen `pi_0` anchor, and enter the separate labels-only scoring
+boundary:
 
 ```bash
 python3 scripts/evaluate_math500.py plan-synthesis \
@@ -233,8 +420,8 @@ python3 scripts/evaluate_math500.py plan-synthesis \
 
 python3 scripts/evaluate_math500.py run-openai \
   --run-dir outputs/evals/math500-cat-final-synthesis \
-  --base-url http://127.0.0.1:8000/v1 \
-  --api-key-env CAT_EVAL_API_KEY \
+  --base-url http://127.0.0.1:8001/v1 \
+  --api-key-env CAT_ANCHOR_API_KEY \
   --batch-size 16
 
 python3 scripts/evaluate_math500.py score-raw \
@@ -248,8 +435,38 @@ python3 scripts/evaluate_math500.py score-synthesis \
 ```
 
 See [`docs/evaluation.md`](evaluation.md) for metric and artifact details. The two
-runs measure the trained policy's raw performance and its optional additional gain
-from inference-time self-synthesis.
+runs measure the trained policy's raw performance and the additional gain, if any,
+from frozen-`pi_0` synthesis over `pi_T` rollouts.
+
+After the fixed checkpoint is registered and all four evaluation plans exist, join
+the complete `pi_0 -> training -> pi_T` lineage and verify it against the live stage
+artifacts:
+
+```bash
+python3 scripts/train_math500.py finalize-experiment \
+  --output outputs/experiment/math500-registry.json \
+  --preregistration outputs/experiment/math500-preregistration.json \
+  --initial-raw-run-dir outputs/evals/math500-initial-raw \
+  --initial-synthesis-run-dir outputs/evals/math500-initial-synthesis \
+  --training-run-dir outputs/training/math500-cat \
+  --trained-raw-run-dir outputs/evals/math500-cat-final-raw \
+  --trained-synthesis-run-dir outputs/evals/math500-cat-final-synthesis
+
+python3 scripts/train_math500.py verify-experiment \
+  --registry outputs/experiment/math500-registry.json \
+  --preregistration outputs/experiment/math500-preregistration.json \
+  --initial-raw-run-dir outputs/evals/math500-initial-raw \
+  --initial-synthesis-run-dir outputs/evals/math500-initial-synthesis \
+  --training-run-dir outputs/training/math500-cat \
+  --trained-raw-run-dir outputs/evals/math500-cat-final-raw \
+  --trained-synthesis-run-dir outputs/evals/math500-cat-final-synthesis
+```
+
+The registry content-addresses plans and checkpoint lineage, not generated answers
+or scores. Archive verified execution and scoring artifacts separately in the run
+record. Registry outputs must remain outside all bound stage directories and the
+registered checkpoint export; trained-evaluation handoff files likewise cannot be
+written into either registered checkpoint tree.
 
 ## Label firewall and limitations
 
@@ -260,12 +477,16 @@ non-null ground truth. `labels.jsonl`, answers, and reference solutions are excl
 from reward, prompt selection, early stopping, and checkpoint selection; scoring is
 the first labels-only boundary.
 
-The paper reports eight H100s for its trainer, but this implementation also requires
-an external frozen-anchor endpoint. Its hardware is not included in the configured
-eight-GPU trainer allocation, so a run using separate anchor hardware is a
-system-resource reproduction rather than an exact accounting reproduction.
+The paper reports eight H100s but does not publish the anchor placement or whether
+that count includes it. This implementation uses an external frozen-anchor endpoint,
+so every run must separately record and budget its placement and contention policy;
+using additional anchor hardware is an accounting and runtime deviation.
 Checkpoint registration remains non-reportable because the external anchor service
 and distributed runtime are not content-attested. `run-openai` is also marked
 non-reportable because an HTTP endpoint cannot prove it serves the registered
-checkpoint. No training or real-model evaluation has been run as part of building
-this infrastructure.
+checkpoint. Supplying the external evidence required for launch does not change
+those hard-coded reportability fields; scientific reportability requires a new
+versioned execution backend and schema. No training or real-model evaluation has
+been run as part of building this planning and contract infrastructure. The staged
+gates, observability record, seed policy, and token/cost ceilings are in the
+[experiment plan](experiment_plan.md).

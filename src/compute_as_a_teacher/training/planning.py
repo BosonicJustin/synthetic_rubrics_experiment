@@ -23,7 +23,13 @@ from compute_as_a_teacher.evaluation.prompts import (
 
 from .config import TrainingConfig
 from .errors import TrainingError
-from .verl_adapter import VerlCommand, build_verl_command, command_from_dict
+from .verl_adapter import (
+    LaunchLease,
+    VerlCommand,
+    build_verl_command,
+    command_from_dict,
+    exclusive_launch,
+)
 
 
 MANIFEST_NAME = "manifest.json"
@@ -145,8 +151,26 @@ def write_training_plan(
     dataset_lock_path: Path,
     repository_root: Path,
     force: bool = False,
+    _lease: LaunchLease | None = None,
 ) -> dict[str, Any]:
+    run_dir = run_dir.resolve()
     config.assert_runnable()
+    if _lease is None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        with exclusive_launch(run_dir) as lease:
+            return write_training_plan(
+                run_dir,
+                questions,
+                config,
+                raw_prompt_template,
+                synthesis_prompt_template,
+                questions_path=questions_path,
+                dataset_lock_path=dataset_lock_path,
+                repository_root=repository_root,
+                force=force,
+                _lease=lease,
+            )
+    _lease.assert_for(run_dir)
     validate_prompt_template(synthesis_prompt_template, config.synthesis.prompt)
     rows = build_training_rows(questions, config, raw_prompt_template)
     data_payload = canonical_jsonl_bytes(rows)
@@ -221,6 +245,8 @@ def write_training_plan(
             "anchor_receives_ordered_rollout_texts": True,
             "reward": "boxed_answer_agreement_with_synthesis",
             "kl_reference": "initial_policy",
+            "loss_aggregation": "sequence_mean_token_mean",
+            "optimizer": "adamw",
             "fixed_final_checkpoint": config.grpo.max_steps,
         },
     }

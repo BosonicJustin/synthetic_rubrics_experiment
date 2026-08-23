@@ -40,8 +40,8 @@ class InvalidAnchorClient:
 def _kwargs(client: Any) -> dict[str, Any]:
     return {
         "repository_root": REPOSITORY_ROOT,
-        "prompt_path": "prompts/math500/synthesis_cot_v1.txt",
-        "prompt_version": "paper_appendix_f_cot_boxfix_v1",
+        "prompt_path": "prompts/math500/synthesis_cot_appendix_f_literal.txt",
+        "prompt_version": "paper_appendix_f_cot_literal_v1",
         "prompt_prefix": "/no_think\n",
         "anchor_base_url": "http://127.0.0.1:8000/v1",
         "anchor_model": "frozen-anchor",
@@ -158,6 +158,7 @@ class VerlBatchRewardTests(unittest.TestCase):
             self.assertEqual(row["rollout_extraction_status"], "ok")
             self.assertIn(row["anchor_response_sha256"], anchor_hashes)
             self.assertRegex(row["anchor_answer_sha256"], r"^[0-9a-f]{64}$")
+            self.assertGreaterEqual(row["anchor_latency_seconds"], 0.0)
             self.assertNotIn("anchor_answer", row)
             self.assertNotIn(r"\boxed", str(row))
 

@@ -17,6 +17,7 @@ from collections.abc import Iterable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from compute_as_a_teacher.evaluation.artifacts import sha256_text
@@ -187,6 +188,7 @@ def _score_group(
 ) -> tuple[tuple[int, dict[str, Any]], ...]:
     anchor_prompt = render_anchor_prompt(template, prompt, group.rollouts)
     seed = derive_seed(base_seed, group.question_id, "anchor", 0)
+    started = perf_counter()
     try:
         synthesized = client.complete(
             model=model,
@@ -203,6 +205,7 @@ def _score_group(
         raise RewardContractError(
             f"anchor client failed for question {group.question_id!r}"
         ) from exc
+    latency_seconds = perf_counter() - started
     if not isinstance(synthesized, str) or not synthesized.strip():
         raise RewardContractError("anchor client returned an invalid text response")
 
@@ -223,6 +226,7 @@ def _score_group(
         "anchor_response_sha256": sha256_text(synthesized),
         "anchor_answer_sha256": anchor_answer_sha256,
         "anchor_extraction_status": reward_result.anchor_status,
+        "anchor_latency_seconds": latency_seconds,
     }
     rows: list[tuple[int, dict[str, Any]]] = []
     for position, row_index in enumerate(group.row_indices):

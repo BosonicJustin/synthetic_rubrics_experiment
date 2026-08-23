@@ -16,6 +16,12 @@ from compute_as_a_teacher.evaluation.artifacts import (
 
 from .errors import TrainingError
 from .planning import load_training_plan
+from .verl_adapter import (
+    LaunchLease,
+    exclusive_launch,
+    validate_export_destination,
+    validate_verl_checkpoint,
+)
 
 
 CHECKPOINT_MANIFEST_NAME = "checkpoint_manifest.json"
@@ -60,23 +66,39 @@ def register_final_checkpoint(
     export_dir: Path,
     *,
     force: bool = False,
+    _lease: LaunchLease | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     run_dir = run_dir.resolve()
     export_dir = export_dir.resolve()
+    if _lease is None:
+        with exclusive_launch(run_dir) as lease:
+            return register_final_checkpoint(
+                run_dir,
+                export_dir,
+                force=force,
+                _lease=lease,
+            )
+    _lease.assert_for(run_dir)
     plan, _ = load_training_plan(run_dir)
     final_step = plan["config"]["grpo"]["max_steps"]
     selected = plan["config"]["checkpointing"]["selected_checkpoint"]
     if selected != "fixed_final_step":
         raise TrainingError("Only the predeclared fixed final checkpoint may be registered")
-    checkpoint_root = run_dir / "checkpoints"
-    tracker = checkpoint_root / "latest_checkpointed_iteration.txt"
+    runtime = plan["config"]["runtime"]
+    world_size = runtime["nodes"] * runtime["gpus_per_node"]
+    tracker = run_dir / "checkpoints/latest_checkpointed_iteration.txt"
     try:
         tracked_step = int(tracker.read_text(encoding="utf-8").strip())
     except (OSError, ValueError) as exc:
         raise TrainingError(f"Cannot verify verl final-step tracker {tracker}: {exc}") from exc
     if tracked_step != final_step:
         raise TrainingError(f"Expected completed step {final_step}, found {tracked_step}")
-    actor_dir = checkpoint_root / f"global_step_{final_step}" / "actor"
+    actor_dir = validate_verl_checkpoint(
+        run_dir,
+        final_step,
+        expected_world_size=world_size,
+    )
+    export_dir = validate_export_destination(run_dir, actor_dir, export_dir)
     actor_inventory, actor_digest = directory_inventory(actor_dir)
     export_inventory, export_digest = directory_inventory(export_dir)
     _validate_huggingface_export(export_dir, export_inventory)

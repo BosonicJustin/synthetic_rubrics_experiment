@@ -15,10 +15,8 @@ SYNTHESIS_PLACEHOLDER = "{rollouts}"
 REQUIRED_SYNTHESIS_ROLLOUTS = 8
 
 # Hashes turn the human-readable version names into immutable prompt contracts.
-# The synthesis wording follows Appendix F with one disclosed repair: the PDF
-# prints ``$ boxed{answer}$``; this runnable version restores the LaTeX command
-# slash so it matches the paper's boxed-answer extraction contract. The raw
-# wording is a local, explicitly versioned choice because the paper omits it.
+# The literal Appendix F text is canonical. The one-character boxfix remains
+# registered for an explicitly separate sensitivity protocol.
 PROMPT_REGISTRY = {
     "raw_math500_local_v1": {
         "path": "prompts/math500/solve_v1.txt",
@@ -27,6 +25,10 @@ PROMPT_REGISTRY = {
     "paper_appendix_f_cot_boxfix_v1": {
         "path": "prompts/math500/synthesis_cot_v1.txt",
         "sha256": "24f46cf2b510e589acffda4094ad16a586f8287486ebf983a41f0649e4e80a8c",
+    },
+    "paper_appendix_f_cot_literal_v1": {
+        "path": "prompts/math500/synthesis_cot_appendix_f_literal.txt",
+        "sha256": "c1efb453ae280787445a907b97bdc2ff8b2094c20788686cc6c27f27c289374e",
     },
 }
 

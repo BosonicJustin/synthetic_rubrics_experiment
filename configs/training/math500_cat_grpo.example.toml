@@ -61,8 +61,8 @@ rollout_text_only = true
 anchor_role = "initial_policy"
 
 [synthesis.prompt]
-path = "prompts/math500/synthesis_cot_v1.txt"
-version = "paper_appendix_f_cot_boxfix_v1"
+path = "prompts/math500/synthesis_cot_appendix_f_literal.txt"
+version = "paper_appendix_f_cot_literal_v1"
 prefix = "/no_think\n"
 
 [synthesis.sampling]
@@ -80,7 +80,7 @@ base_seed = 2718
 kind = "pseudo_reference_boxed_exact"
 extractor = "last_boxed_string_exact_v1"
 labels_allowed = false
-max_answer_chars = 1000
+max_answer_chars = 50000
 invalid_anchor = "fail_closed"
 
 # Local choice matching verl v0.5.0: torch.std uses Bessel correction. The
@@ -129,6 +129,9 @@ adapter_version = "cat-verl-batch-reward-v1"
 python_executable = "required_absolute_python_from_verl_environment"
 verl_source_path = "required_absolute_verl_checkout"
 model_path = "required_absolute_local_model_snapshot"
+model_snapshot_tree_sha256 = "required_model_snapshot_tree_sha256"
+trainer_image_digest = "required_trainer_image_digest"
+package_inventory_sha256 = "required_target_package_inventory_sha256"
 anchor_base_url = "http://127.0.0.1:8001/v1"
 anchor_model = "cat-frozen-qwen3-4b"
 anchor_api_key_env = "CAT_ANCHOR_API_KEY"
@@ -137,6 +140,8 @@ anchor_max_concurrency = 32
 strategy = "fsdp"
 nodes = 1
 gpus_per_node = 8
+# Local launch-safety choice; preflight refuses substantially occupied trainers.
+minimum_gpu_free_memory_fraction = 0.9
 dtype = "bfloat16"
 rollout_engine = "vllm"
 tensor_parallel_size = 2
@@ -144,6 +149,7 @@ gpu_memory_utilization = 0.5
 max_prompt_tokens = 2048
 max_tokens_per_gpu = 16384
 dataloader_workers = 8
+# Local data-order seed; rollout and synthesis use their own base seeds above.
 seed = 42
 logger = ["console"]
 download_allowed = false

@@ -130,6 +130,25 @@ class BoxedAnswerTests(unittest.TestCase):
 
 
 class PromptContractTests(unittest.TestCase):
+    def test_repaired_sensitivity_prompt_is_one_character_from_appendix(self) -> None:
+        literal = load_prompt(
+            REPOSITORY_ROOT,
+            PromptSpec(
+                path="prompts/math500/synthesis_cot_appendix_f_literal.txt",
+                version="paper_appendix_f_cot_literal_v1",
+                prefix="",
+            ),
+        )
+        runnable = load_prompt(
+            REPOSITORY_ROOT,
+            PromptSpec(
+                path="prompts/math500/synthesis_cot_v1.txt",
+                version="paper_appendix_f_cot_boxfix_v1",
+                prefix="",
+            ),
+        )
+        self.assertEqual(runnable, literal.replace("$ boxed", r"$\boxed", 1))
+
     def test_registered_raw_prompt_is_a_versioned_local_choice(self) -> None:
         spec = PromptSpec(
             path="prompts/math500/solve_v1.txt",
@@ -143,8 +162,8 @@ class PromptContractTests(unittest.TestCase):
 
     def test_appendix_f_synthesis_prompt_uses_only_eight_ordered_rollouts(self) -> None:
         spec = PromptSpec(
-            path="prompts/math500/synthesis_cot_v1.txt",
-            version="paper_appendix_f_cot_boxfix_v1",
+            path="prompts/math500/synthesis_cot_appendix_f_literal.txt",
+            version="paper_appendix_f_cot_literal_v1",
             prefix="/no_think\n",
         )
         template = load_prompt(REPOSITORY_ROOT, spec)
@@ -153,7 +172,7 @@ class PromptContractTests(unittest.TestCase):
         self.assertTrue(rendered.startswith("/no_think\n"))
         self.assertIn("# SUMMARY", rendered)
         self.assertIn("# UNIFIED RESPONSE", rendered)
-        self.assertIn(r"\boxed{answer}", rendered)
+        self.assertIn("$ boxed{answer}$", rendered)
         self.assertNotIn("QUESTION_SENTINEL", rendered)
         positions = [rendered.index(f"ROLLOUT_{index}") for index in range(8)]
         self.assertEqual(positions, sorted(positions))
@@ -161,8 +180,8 @@ class PromptContractTests(unittest.TestCase):
 
     def test_synthesis_prompt_rejects_any_non_eight_group(self) -> None:
         spec = PromptSpec(
-            path="prompts/math500/synthesis_cot_v1.txt",
-            version="paper_appendix_f_cot_boxfix_v1",
+            path="prompts/math500/synthesis_cot_appendix_f_literal.txt",
+            version="paper_appendix_f_cot_literal_v1",
             prefix="",
         )
         template = load_prompt(REPOSITORY_ROOT, spec)
@@ -183,23 +202,25 @@ class ConfigurationContractTests(unittest.TestCase):
         )
         self.assertTrue(raw.model.unresolved_reasons())
         self.assertTrue(synthesis.anchor.unresolved_reasons())
+        self.assertEqual(raw.sampling.base_seed, 1729)
+        self.assertEqual(synthesis.sampling.base_seed, 2718)
         with self.assertRaisesRegex(EvaluationError, "not runnable"):
             load_raw_config(raw_path)
         with self.assertRaisesRegex(EvaluationError, "not runnable"):
             load_synthesis_config(synthesis_path)
 
-    def test_same_anchor_toggle_cannot_disable_the_paper_contract(self) -> None:
+    def test_anchor_relation_is_a_strict_enum(self) -> None:
         source = (
             REPOSITORY_ROOT / "configs/evals/math500_synthesis.example.toml"
         ).read_text(encoding="utf-8")
         source = source.replace(
-            "require_same_model_as_raw = true",
-            "require_same_model_as_raw = false",
+            'anchor_relation = "same_as_raw"',
+            'anchor_relation = "arbitrary_model"',
         )
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "bad.toml"
             path.write_text(source, encoding="utf-8")
-            with self.assertRaisesRegex(EvaluationError, "frozen raw policy"):
+            with self.assertRaisesRegex(EvaluationError, "anchor_relation"):
                 load_synthesis_config(path, allow_unresolved_model=True)
 
     def test_rollout_count_must_be_an_integer_eight(self) -> None:

@@ -189,6 +189,9 @@ class RuntimeSpec:
     python_executable: str
     verl_source_path: str
     model_path: str
+    model_snapshot_tree_sha256: str
+    trainer_image_digest: str
+    package_inventory_sha256: str
     anchor_base_url: str
     anchor_model: str
     anchor_api_key_env: str
@@ -197,6 +200,7 @@ class RuntimeSpec:
     strategy: str
     nodes: int
     gpus_per_node: int
+    minimum_gpu_free_memory_fraction: float
     dtype: str
     rollout_engine: str
     tensor_parallel_size: int
@@ -218,6 +222,21 @@ class RuntimeSpec:
                 reasons.append(f"runtime.{field_name} must be an absolute path")
         if not re.fullmatch(r"[0-9a-f]{40}", self.framework_revision):
             reasons.append("runtime.framework_revision is not a full commit SHA")
+        for field_name in (
+            "model_snapshot_tree_sha256",
+            "package_inventory_sha256",
+        ):
+            value = getattr(self, field_name)
+            if _looks_unresolved(value):
+                reasons.append(f"runtime.{field_name} is unresolved")
+            elif not re.fullmatch(r"[0-9a-f]{64}", value):
+                reasons.append(f"runtime.{field_name} must be a lowercase SHA-256")
+        if _looks_unresolved(self.trainer_image_digest):
+            reasons.append("runtime.trainer_image_digest is unresolved")
+        elif not re.fullmatch(r"sha256:[0-9a-f]{64}", self.trainer_image_digest):
+            reasons.append(
+                "runtime.trainer_image_digest must be an immutable sha256 digest"
+            )
         return tuple(reasons)
 
 @dataclass(frozen=True, slots=True)
@@ -417,9 +436,12 @@ def _parse_runtime(value: Any) -> RuntimeSpec:
     table = _mapping(value, "runtime")
     expected = {
         "framework", "framework_release", "framework_revision", "adapter_version",
-        "python_executable", "verl_source_path", "model_path", "anchor_base_url",
+        "python_executable", "verl_source_path", "model_path",
+        "model_snapshot_tree_sha256", "trainer_image_digest",
+        "package_inventory_sha256", "anchor_base_url",
         "anchor_model", "anchor_api_key_env", "anchor_timeout_seconds",
-        "anchor_max_concurrency", "strategy", "nodes", "gpus_per_node", "dtype",
+        "anchor_max_concurrency", "strategy", "nodes", "gpus_per_node",
+        "minimum_gpu_free_memory_fraction", "dtype",
         "rollout_engine", "tensor_parallel_size", "gpu_memory_utilization",
         "max_prompt_tokens", "max_tokens_per_gpu", "dataloader_workers", "seed",
         "logger", "download_allowed",
@@ -433,6 +455,15 @@ def _parse_runtime(value: Any) -> RuntimeSpec:
     gpu_memory = _number(table["gpu_memory_utilization"], "runtime.gpu_memory_utilization", minimum=0.0)
     if not 0 < gpu_memory < 1:
         raise TrainingError("runtime.gpu_memory_utilization must be in (0, 1)")
+    minimum_free_memory = _number(
+        table["minimum_gpu_free_memory_fraction"],
+        "runtime.minimum_gpu_free_memory_fraction",
+        minimum=0.0,
+    )
+    if not 0 < minimum_free_memory <= 1:
+        raise TrainingError(
+            "runtime.minimum_gpu_free_memory_fraction must be in (0, 1]"
+        )
     seed = _integer(table["seed"], "runtime.seed")
     if seed >= 2**31:
         raise TrainingError("runtime.seed must be below 2^31")
@@ -444,6 +475,17 @@ def _parse_runtime(value: Any) -> RuntimeSpec:
         python_executable=_text(table["python_executable"], "runtime.python_executable"),
         verl_source_path=_text(table["verl_source_path"], "runtime.verl_source_path"),
         model_path=_text(table["model_path"], "runtime.model_path"),
+        model_snapshot_tree_sha256=_text(
+            table["model_snapshot_tree_sha256"],
+            "runtime.model_snapshot_tree_sha256",
+        ),
+        trainer_image_digest=_text(
+            table["trainer_image_digest"], "runtime.trainer_image_digest"
+        ),
+        package_inventory_sha256=_text(
+            table["package_inventory_sha256"],
+            "runtime.package_inventory_sha256",
+        ),
         anchor_base_url=_text(table["anchor_base_url"], "runtime.anchor_base_url"),
         anchor_model=_text(table["anchor_model"], "runtime.anchor_model"),
         anchor_api_key_env=_text(table["anchor_api_key_env"], "runtime.anchor_api_key_env"),
@@ -452,6 +494,7 @@ def _parse_runtime(value: Any) -> RuntimeSpec:
         strategy=_text(table["strategy"], "runtime.strategy"),
         nodes=_integer(table["nodes"], "runtime.nodes", minimum=1),
         gpus_per_node=_integer(table["gpus_per_node"], "runtime.gpus_per_node", minimum=1),
+        minimum_gpu_free_memory_fraction=minimum_free_memory,
         dtype=_text(table["dtype"], "runtime.dtype"),
         rollout_engine=_text(table["rollout_engine"], "runtime.rollout_engine"),
         tensor_parallel_size=_integer(table["tensor_parallel_size"], "runtime.tensor_parallel_size", minimum=1),
@@ -469,6 +512,22 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
     failures: list[str] = []
     if config.policy != config.anchor.model:
         failures.append("anchor.model must exactly equal the initial policy")
+    model_expected = {
+        "provider": "huggingface",
+        "model_id": "Qwen/Qwen3-4B",
+        "tokenizer_id": "Qwen/Qwen3-4B",
+        "adapter_version": "transformers-vllm-pinned-by-verl-v0.5.0",
+        "seed_support": "best_effort",
+    }
+    for name, expected in model_expected.items():
+        if getattr(config.policy, name) != expected:
+            failures.append(f"policy.{name} must be {expected!r}")
+    if config.policy.dtype != "bfloat16":
+        failures.append("policy.dtype must be 'bfloat16'")
+    if config.policy.quantization != "none":
+        failures.append("policy.quantization must be 'none'")
+    if config.policy.dtype != config.runtime.dtype:
+        failures.append("policy.dtype must equal runtime.dtype")
     if config.anchor.source != "initial_policy" or not config.anchor.frozen:
         failures.append("anchor must be the frozen initial_policy")
     if config.rollouts.group_size != 8 or not config.rollouts.fresh_per_step:
@@ -477,18 +536,32 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
         failures.append("synthesis must consume exactly 8 rollouts")
     if not config.synthesis.rollout_text_only or config.synthesis.anchor_role != "initial_policy":
         failures.append("synthesis must send rollout text only to initial_policy")
-    if config.rollouts.prompt.version != "raw_math500_local_v1":
-        failures.append("rollouts must use raw_math500_local_v1")
-    if config.synthesis.prompt.version != "paper_appendix_f_cot_boxfix_v1":
-        failures.append("synthesis must use paper_appendix_f_cot_boxfix_v1")
+    prompt_expected = {
+        "rollouts": PromptSpec(
+            path="prompts/math500/solve_v1.txt",
+            version="raw_math500_local_v1",
+            prefix="/no_think\n",
+        ),
+        "synthesis": PromptSpec(
+            path="prompts/math500/synthesis_cot_appendix_f_literal.txt",
+            version="paper_appendix_f_cot_literal_v1",
+            prefix="/no_think\n",
+        ),
+    }
+    for role, expected in prompt_expected.items():
+        if getattr(config, role).prompt != expected:
+            failures.append(f"{role}.prompt must match the registered local choice")
     if config.reward != RewardSpec(
         kind="pseudo_reference_boxed_exact",
         extractor=PRIMARY_GRADER,
         labels_allowed=False,
-        max_answer_chars=config.reward.max_answer_chars,
+        max_answer_chars=50_000,
         invalid_anchor="fail_closed",
     ):
-        failures.append("reward must be label-free exact boxed agreement and fail closed")
+        failures.append(
+            "reward must use the locked 50,000-character, label-free exact boxed "
+            "agreement contract and fail closed"
+        )
     if config.advantage != AdvantageSpec(
         kind="group_zscore",
         std_ddof=1,
@@ -506,6 +579,9 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
         "max_steps": 1000,
         "kl_placement": "reward",
         "kl_coefficient": 1e-3,
+        "clip_epsilon": 0.2,
+        "ppo_epochs": 1,
+        "ppo_mini_batch_size": 256,
         "normalize_advantages": True,
     }
     for name, expected in expected_grpo.items():
@@ -529,6 +605,7 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
         "gpus_per_node": 8,
         "dtype": "bfloat16",
         "rollout_engine": "vllm",
+        "seed": 42,
         "download_allowed": False,
     }
     for name, expected in runtime_expected.items():
@@ -546,9 +623,9 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
     trajectory_batch = config.grpo.global_batch_size * config.rollouts.group_size
     if trajectory_batch % total_gpus:
         failures.append("trajectory batch must be divisible by total GPUs")
-    for role, sampling in (
-        ("rollouts", config.rollouts.sampling),
-        ("synthesis", config.synthesis.sampling),
+    for role, sampling, base_seed in (
+        ("rollouts", config.rollouts.sampling, 1729),
+        ("synthesis", config.synthesis.sampling, 2718),
     ):
         if (
             not sampling.do_sample
@@ -559,15 +636,23 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
             or sampling.num_beams != 1
             or sampling.repetition_penalty != 1.0
             or sampling.stop
+            or sampling.base_seed != base_seed
         ):
-            failures.append(f"{role}.sampling must match the Qwen3-4B paper profile")
+            failures.append(
+                f"{role}.sampling must match the registered Qwen3-4B profile"
+            )
     if "qwen3-4b" in config.policy.model_id.lower():
         if config.rollouts.prompt.prefix != "/no_think\n" or config.synthesis.prompt.prefix != "/no_think\n":
             failures.append("Qwen3-4B requires the exact '/no_think\\n' prefix")
-    if config.checkpointing.selected_checkpoint != "fixed_final_step":
-        failures.append("checkpoint selection must be fixed_final_step")
-    if config.checkpointing.resume_mode != "auto":
-        failures.append("checkpointing.resume_mode must be 'auto'")
+    checkpoint_expected = {
+        "save_every_steps": 100,
+        "selected_checkpoint": "fixed_final_step",
+        "resume_mode": "auto",
+        "max_checkpoints": 3,
+    }
+    for name, expected in checkpoint_expected.items():
+        if getattr(config.checkpointing, name) != expected:
+            failures.append(f"checkpointing.{name} must be {expected!r}")
     if failures:
         raise TrainingError("Training config violates the registered protocol: " + "; ".join(failures))
 

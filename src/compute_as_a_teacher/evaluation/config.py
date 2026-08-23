@@ -13,6 +13,9 @@ from .schemas import ModelSpec, SamplingSpec
 
 
 MATH500_PROTOCOL_VERSION = "cat_math500_paper_v1"
+SYNTHESIS_ANCHOR_RELATIONS = frozenset(
+    {"same_as_raw", "frozen_initial_for_trained_raw"}
+)
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
     if not isinstance(value, dict):
@@ -99,7 +102,7 @@ class SynthesisEvalConfig:
     protocol_version: str
     run_name: str
     required_rollouts: int
-    require_same_model_as_raw: bool
+    anchor_relation: str
     prompt: PromptSpec
     anchor: ModelSpec
     sampling: SamplingSpec
@@ -111,7 +114,7 @@ class SynthesisEvalConfig:
             "protocol_version": self.protocol_version,
             "run_name": self.run_name,
             "required_rollouts": self.required_rollouts,
-            "require_same_model_as_raw": self.require_same_model_as_raw,
+            "anchor_relation": self.anchor_relation,
             "prompt": self.prompt.to_dict(),
             "anchor": self.anchor.to_dict(),
             "sampling": self.sampling.to_dict(),
@@ -197,23 +200,23 @@ def load_synthesis_config(
         "protocol_version",
         "run_name",
         "required_rollouts",
-        "require_same_model_as_raw",
+        "anchor_relation",
         "prompt",
         "anchor",
         "sampling",
     }
     _exact_keys(value, expected, "synthesis config")
-    if value["schema_version"] != 1 or value["kind"] != "synthesis":
+    if value["schema_version"] != 2 or value["kind"] != "synthesis":
         raise EvaluationError(
-            "Synthesis config must use schema_version=1 and kind='synthesis'"
+            "Synthesis config must use schema_version=2 and kind='synthesis'"
         )
     if type(value["required_rollouts"]) is not int or value["required_rollouts"] != 8:
         raise EvaluationError("The paper-aligned synthesis plan requires exactly 8 rollouts")
-    if not isinstance(value["require_same_model_as_raw"], bool):
-        raise EvaluationError("require_same_model_as_raw must be a boolean")
-    if value["require_same_model_as_raw"] is not True:
+    anchor_relation = value["anchor_relation"]
+    if anchor_relation not in SYNTHESIS_ANCHOR_RELATIONS:
         raise EvaluationError(
-            "The paper-aligned protocol requires the frozen raw policy as synthesis anchor"
+            "anchor_relation must be 'same_as_raw' or "
+            "'frozen_initial_for_trained_raw'"
         )
     protocol_version = _text(value["protocol_version"], "protocol_version")
     if protocol_version != MATH500_PROTOCOL_VERSION:
@@ -221,12 +224,12 @@ def load_synthesis_config(
             f"protocol_version must be {MATH500_PROTOCOL_VERSION!r}"
         )
     return SynthesisEvalConfig(
-        schema_version=1,
+        schema_version=2,
         kind="synthesis",
         protocol_version=protocol_version,
         run_name=_text(value["run_name"], "run_name"),
         required_rollouts=8,
-        require_same_model_as_raw=value["require_same_model_as_raw"],
+        anchor_relation=anchor_relation,
         prompt=PromptSpec.from_dict(_mapping(value["prompt"], "prompt")),
         anchor=ModelSpec.from_dict(
             _mapping(value["anchor"], "anchor"),

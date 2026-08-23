@@ -6,17 +6,50 @@ therefore cannot initialize a model or a GPU runtime.
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
 import os
+import re
+import signal
 import subprocess
+import threading
+import time
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from compute_as_a_teacher.evaluation.artifacts import canonical_json_bytes, sha256_bytes
 
 from .config import SUPPORTED_VERL_REVISION, TrainingConfig
 from .errors import TrainingError
+
+
+LAUNCH_LOCK_NAME = ".launch.lock"
+_PROCESS_EXIT_GRACE_SECONDS = 0.25
+_PROCESS_GROUP_STOP_SECONDS = 10.0
+
+
+class LaunchLease:
+    __slots__ = ("_active", "_descriptor", "_owner_pid", "run_dir")
+
+    def __init__(self, run_dir: Path, descriptor: int) -> None:
+        self.run_dir = run_dir.resolve()
+        self._descriptor = descriptor
+        self._owner_pid = os.getpid()
+        self._active = True
+
+    def assert_for(self, run_dir: Path) -> None:
+        if (
+            not self._active
+            or self._owner_pid != os.getpid()
+            or self.run_dir != run_dir.resolve()
+        ):
+            raise TrainingError("A live launch lease for this run directory is required")
+
+    def _release(self) -> None:
+        self._active = False
 
 
 def _hydra_string(value: str) -> str:
@@ -65,11 +98,8 @@ def build_verl_command(
         repository_root
         / "src/compute_as_a_teacher/training/verl_reward.py"
     ).resolve()
-    dataset_module = (
-        repository_root
-        / "src/compute_as_a_teacher/training/verl_dataset.py"
-    ).resolve()
     checkpoints = (run_dir / "checkpoints").resolve()
+    rollout_logs = (run_dir / "rollout_logs").resolve()
     rollout = config.rollouts.sampling
     synthesis = config.synthesis.sampling
     runtime = config.runtime
@@ -91,7 +121,8 @@ def build_verl_command(
         "data.return_raw_chat=True",
         f"data.dataloader_num_workers={runtime.dataloader_workers}",
         "data.trust_remote_code=False",
-        f"data.custom_cls.path={_hydra_string(str(dataset_module))}",
+        "data.custom_cls.path="
+        f"{_hydra_string('pkg://compute_as_a_teacher.training.verl_dataset')}",
         "data.custom_cls.name=JsonlRLHFDataset",
         f"actor_rollout_ref.model.path={_hydra_string(runtime.model_path)}",
         "actor_rollout_ref.model.trust_remote_code=False",
@@ -110,6 +141,7 @@ def build_verl_command(
         f"actor_rollout_ref.actor.clip_ratio_high={config.grpo.clip_epsilon}",
         f"actor_rollout_ref.actor.ppo_epochs={config.grpo.ppo_epochs}",
         f"actor_rollout_ref.actor.ppo_mini_batch_size={config.grpo.ppo_mini_batch_size}",
+        "actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean",
         "actor_rollout_ref.actor.use_dynamic_bsz=True",
         f"actor_rollout_ref.actor.ppo_max_token_len_per_gpu={runtime.max_tokens_per_gpu}",
         "actor_rollout_ref.actor.shuffle=False",
@@ -183,6 +215,7 @@ def build_verl_command(
         f"trainer.save_freq={config.checkpointing.save_every_steps}",
         f"trainer.resume_mode={config.checkpointing.resume_mode}",
         f"trainer.default_local_dir={_hydra_string(str(checkpoints))}",
+        f"trainer.rollout_data_dir={_hydra_string(str(rollout_logs))}",
         f"trainer.max_actor_ckpt_to_keep={config.checkpointing.max_checkpoints}",
         f"trainer.nnodes={runtime.nodes}",
         f"trainer.n_gpus_per_node={runtime.gpus_per_node}",
@@ -255,9 +288,123 @@ def verify_verl_checkout(path: Path, expected_revision: str) -> None:
         raise TrainingError(
             f"verl checkout revision mismatch: expected {expected_revision}, found {actual}"
         )
+    try:
+        status = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(path),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise TrainingError(f"Cannot verify verl checkout at {path}: {exc}") from exc
+    if status.stdout.strip():
+        raise TrainingError(f"verl checkout must be clean: {path}")
 
 
-def checkpointed_step(run_dir: Path, max_steps: int) -> int:
+_SHARD_NAME = re.compile(
+    r"(?P<kind>model|optim|extra_state)_world_size_(?P<world_size>\d+)_rank_(?P<rank>\d+)\.pt"
+)
+
+
+def _checkpoint_file(path: Path, name: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise TrainingError(f"verl checkpoint is missing {name}: {path}")
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise TrainingError(f"Cannot inspect verl checkpoint file {path}: {exc}") from exc
+    if size == 0:
+        raise TrainingError(f"verl checkpoint file is empty: {path}")
+
+
+def validate_verl_checkpoint(
+    run_dir: Path,
+    step: int,
+    *,
+    expected_world_size: int | None = None,
+) -> Path:
+    """Validate the on-disk checkpoint contract emitted by pinned verl v0.5.0."""
+
+    if type(step) is not int or step <= 0:
+        raise TrainingError("A saved verl checkpoint step must be a positive integer")
+    if expected_world_size is not None and (
+        type(expected_world_size) is not int or expected_world_size <= 0
+    ):
+        raise TrainingError("expected_world_size must be a positive integer")
+
+    step_dir = run_dir.resolve() / "checkpoints" / f"global_step_{step}"
+    actor_dir = step_dir / "actor"
+    if step_dir.is_symlink() or not step_dir.is_dir():
+        raise TrainingError(f"verl checkpoint step directory is missing: {step_dir}")
+    if actor_dir.is_symlink() or not actor_dir.is_dir():
+        raise TrainingError(f"verl actor checkpoint directory is missing: {actor_dir}")
+
+    _checkpoint_file(step_dir / "data.pt", "dataloader state")
+    fsdp_config_path = actor_dir / "fsdp_config.json"
+    _checkpoint_file(fsdp_config_path, "actor fsdp_config.json")
+    _checkpoint_file(
+        actor_dir / "huggingface" / "config.json",
+        "actor Hugging Face config.json",
+    )
+    try:
+        fsdp_config = json.loads(fsdp_config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TrainingError(
+            f"Cannot read verl actor FSDP config {fsdp_config_path}: {exc}"
+        ) from exc
+    if not isinstance(fsdp_config, dict):
+        raise TrainingError("verl actor FSDP config must be a JSON object")
+    if set(fsdp_config) != {"FSDP_version", "world_size"}:
+        raise TrainingError("verl actor FSDP config has unexpected fields")
+    if (
+        type(fsdp_config["FSDP_version"]) is not int
+        or fsdp_config["FSDP_version"] != 1
+    ):
+        raise TrainingError("verl actor checkpoint must use FSDP version 1")
+    world_size = fsdp_config.get("world_size")
+    if type(world_size) is not int or world_size <= 0:
+        raise TrainingError("verl actor FSDP world_size must be a positive integer")
+    if expected_world_size is not None and world_size != expected_world_size:
+        raise TrainingError(
+            "verl actor FSDP world_size mismatch: "
+            f"expected {expected_world_size}, found {world_size}"
+        )
+
+    expected_names = {
+        f"{kind}_world_size_{world_size}_rank_{rank}.pt"
+        for kind in ("model", "optim", "extra_state")
+        for rank in range(world_size)
+    }
+    actual_names = {
+        path.name
+        for path in actor_dir.iterdir()
+        if path.is_file() and _SHARD_NAME.fullmatch(path.name)
+    }
+    if actual_names != expected_names:
+        missing = sorted(expected_names - actual_names)
+        unexpected = sorted(actual_names - expected_names)
+        raise TrainingError(
+            "verl actor checkpoint shard set is invalid: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    for name in sorted(expected_names):
+        _checkpoint_file(actor_dir / name, f"actor shard {name}")
+    return actor_dir
+
+
+def checkpointed_step(
+    run_dir: Path,
+    max_steps: int,
+    *,
+    expected_world_size: int | None = None,
+) -> int:
     tracker = run_dir.resolve() / "checkpoints/latest_checkpointed_iteration.txt"
     if not tracker.exists():
         return 0
@@ -267,14 +414,193 @@ def checkpointed_step(run_dir: Path, max_steps: int) -> int:
         raise TrainingError(f"Cannot read checkpoint tracker {tracker}: {exc}") from exc
     if not 0 <= step <= max_steps:
         raise TrainingError(f"Checkpoint step {step} is outside [0, {max_steps}]")
+    if step:
+        validate_verl_checkpoint(
+            run_dir,
+            step,
+            expected_world_size=expected_world_size,
+        )
     return step
 
 
-def launch_verl(command: VerlCommand, config: TrainingConfig, run_dir: Path) -> int:
+@contextmanager
+def exclusive_launch(run_dir: Path) -> Iterator[LaunchLease]:
+    root = run_dir.resolve()
+    lock = root / LAUNCH_LOCK_NAME
+    try:
+        descriptor = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as exc:
+        raise TrainingError(f"Cannot open training launch lock {lock}: {exc}") from exc
+    acquired = False
+    lease: LaunchLease | None = None
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise TrainingError(
+                    f"Training launch is already locked: {lock}"
+                ) from exc
+            raise TrainingError(
+                f"Cannot acquire training launch lock {lock}: {exc}"
+            ) from exc
+        acquired = True
+        try:
+            os.ftruncate(descriptor, 0)
+            os.write(descriptor, f"pid={os.getpid()}\n".encode("ascii"))
+            os.fsync(descriptor)
+        except OSError as exc:
+            raise TrainingError(f"Cannot record training lock owner: {exc}") from exc
+        lease = LaunchLease(root, descriptor)
+        yield lease
+    finally:
+        try:
+            if acquired:
+                if lease is not None:
+                    lease._release()
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+@contextmanager
+def exclusive_launches(run_dirs: Sequence[Path]) -> Iterator[Mapping[Path, LaunchLease]]:
+    """Acquire multiple launch locks in the caller's declared global order."""
+
+    roots = tuple(dict.fromkeys(path.resolve() for path in run_dirs))
+    with ExitStack() as stack:
+        leases = {
+            root: stack.enter_context(exclusive_launch(root)) for root in roots
+        }
+        yield leases
+
+
+def _signal_process_group(group_id: int, signal_number: int) -> bool:
+    try:
+        os.killpg(group_id, signal_number)
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return False
+        raise TrainingError(
+            f"Cannot signal trainer process group {group_id}: {exc}"
+        ) from exc
+    return True
+
+
+def _wait_for_group_exit(group_id: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(group_id, 0)
+        except KeyboardInterrupt:
+            continue
+        except OSError as exc:
+            if exc.errno == errno.ESRCH:
+                return True
+            if exc.errno == errno.EPERM:
+                try:
+                    time.sleep(0.05)
+                except KeyboardInterrupt:
+                    pass
+                continue
+            raise TrainingError(
+                f"Cannot inspect trainer process group {group_id}: {exc}"
+            ) from exc
+        try:
+            time.sleep(0.05)
+        except KeyboardInterrupt:
+            pass
+    return False
+
+
+def _wait_for_process(process: subprocess.Popen[str], timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return process.poll() is not None
+        try:
+            process.wait(timeout=remaining)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+        except KeyboardInterrupt:
+            continue
+
+
+def _stop_and_wait_once(process: subprocess.Popen[str]) -> None:
+    group_id = process.pid
+    if not _wait_for_process(process, _PROCESS_EXIT_GRACE_SECONDS):
+        _signal_process_group(group_id, signal.SIGTERM)
+        if not _wait_for_process(process, _PROCESS_GROUP_STOP_SECONDS):
+            _signal_process_group(group_id, signal.SIGKILL)
+            if not _wait_for_process(process, _PROCESS_GROUP_STOP_SECONDS):
+                raise TrainingError(f"Trainer leader process {group_id} did not exit")
+    if not _signal_process_group(group_id, signal.SIGTERM):
+        return
+    if _wait_for_group_exit(group_id, _PROCESS_GROUP_STOP_SECONDS):
+        return
+    _signal_process_group(group_id, signal.SIGKILL)
+    if not _wait_for_group_exit(group_id, _PROCESS_GROUP_STOP_SECONDS):
+        raise TrainingError(f"Trainer process group {group_id} did not exit")
+
+
+def _stop_and_wait(process: subprocess.Popen[str]) -> None:
+    while True:
+        try:
+            _stop_and_wait_once(process)
+            return
+        except (KeyboardInterrupt, SystemExit):
+            continue
+
+
+@contextmanager
+def _forward_termination_signals(process: subprocess.Popen[str]) -> Iterator[None]:
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = {
+        signal_number: signal.getsignal(signal_number)
+        for signal_number in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    def forward(signal_number: int, _frame: Any) -> None:
+        _signal_process_group(process.pid, signal_number)
+        if signal_number == signal.SIGINT:
+            raise KeyboardInterrupt
+        raise SystemExit(128 + signal_number)
+
+    try:
+        for signal_number in previous:
+            signal.signal(signal_number, forward)
+        yield
+    finally:
+        for signal_number, handler in previous.items():
+            signal.signal(signal_number, handler)
+
+
+def launch_verl(
+    command: VerlCommand,
+    config: TrainingConfig,
+    run_dir: Path,
+    *,
+    lease: LaunchLease | None = None,
+) -> int:
     """Run the already planned command after a no-download preflight."""
 
+    run_dir = run_dir.resolve()
+    if lease is None:
+        with exclusive_launch(run_dir) as acquired:
+            return launch_verl(command, config, run_dir, lease=acquired)
+    lease.assert_for(run_dir)
+
     config.assert_runnable()
-    if checkpointed_step(run_dir, config.grpo.max_steps) == config.grpo.max_steps:
+    world_size = config.runtime.nodes * config.runtime.gpus_per_node
+    if checkpointed_step(
+        run_dir,
+        config.grpo.max_steps,
+        expected_world_size=world_size,
+    ) == config.grpo.max_steps:
         raise TrainingError("Training already reached the fixed final step")
     python = Path(config.runtime.python_executable).resolve()
     model = Path(config.runtime.model_path).resolve()
@@ -290,13 +616,71 @@ def launch_verl(command: VerlCommand, config: TrainingConfig, run_dir: Path) -> 
         raise TrainingError("Planned command Python no longer matches the config")
     environment = os.environ.copy()
     environment.update(command.environment)
-    completed = subprocess.run(
-        list(command.argv),
+    return run_command_with_log(
+        command.argv,
         cwd=source,
-        env=environment,
-        check=False,
+        environment=environment,
+        log_path=run_dir / "logs" / "trainer.log",
     )
-    return completed.returncode
+
+
+def run_command_with_log(
+    argv: Sequence[str],
+    *,
+    cwd: Path,
+    environment: Mapping[str, str],
+    log_path: Path,
+) -> int:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with log_path.open("a", encoding="utf-8") as log:
+            process = subprocess.Popen(
+                list(argv),
+                cwd=cwd,
+                env=dict(environment),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                start_new_session=True,
+            )
+            with _forward_termination_signals(process):
+                try:
+                    if process.stdout is None:
+                        raise TrainingError("Cannot capture the Verl process output")
+                    with process.stdout:
+                        for line in process.stdout:
+                            print(line, end="", flush=True)
+                            log.write(line)
+                            log.flush()
+                    return process.wait()
+                finally:
+                    _stop_and_wait(process)
+    except OSError as exc:
+        raise TrainingError(f"Cannot launch the Verl process: {exc}") from exc
+
+
+def validate_export_destination(
+    run_dir: Path,
+    actor_checkpoint: Path,
+    export_directory: Path,
+) -> Path:
+    run_root = run_dir.resolve()
+    actor_root = actor_checkpoint.resolve()
+    export_root = export_directory.resolve()
+    if export_root == run_root or export_root in run_root.parents:
+        raise TrainingError(
+            "Export directory must not equal or contain the training run directory"
+        )
+    if (
+        export_root == actor_root
+        or export_root in actor_root.parents
+        or actor_root in export_root.parents
+    ):
+        raise TrainingError(
+            "Export directory must not overlap the actor checkpoint directory"
+        )
+    return export_root
 
 
 def merge_command(
@@ -305,11 +689,26 @@ def merge_command(
     run_dir: Path,
     export_directory: Path,
 ) -> tuple[str, ...]:
+    world_size = config.runtime.nodes * config.runtime.gpus_per_node
+    step = checkpointed_step(
+        run_dir,
+        config.grpo.max_steps,
+        expected_world_size=world_size,
+    )
+    if step != config.grpo.max_steps:
+        raise TrainingError(
+            f"Expected completed step {config.grpo.max_steps}, found {step}"
+        )
     actor_checkpoint = (
         run_dir.resolve()
         / "checkpoints"
         / f"global_step_{config.grpo.max_steps}"
         / "actor"
+    )
+    export_directory = validate_export_destination(
+        run_dir,
+        actor_checkpoint,
+        export_directory,
     )
     return (
         config.runtime.python_executable,
@@ -321,5 +720,5 @@ def merge_command(
         "--local_dir",
         str(actor_checkpoint),
         "--target_dir",
-        str(export_directory.resolve()),
+        str(export_directory),
     )

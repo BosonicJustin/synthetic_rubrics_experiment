@@ -11,6 +11,7 @@ from compute_as_a_teacher.openai_chat import (
     JsonTransport,
     OpenAIChatError,
     OpenAIChatTransport,
+    SUPPORTED_FINISH_REASONS,
     TransportResponse,
     api_key_from_environment,
 )
@@ -59,11 +60,17 @@ def _seed(value: Any) -> int:
     return value
 
 
-def _text_response(value: Mapping[str, Any]) -> str:
+def _text_response(value: Mapping[str, Any], expected_model: str) -> str:
+    if value.get("model") != expected_model:
+        raise AnchorClientError("anchor response model does not match the frozen anchor")
     choices = value.get("choices")
     if not isinstance(choices, list) or len(choices) != 1:
         raise AnchorClientError("anchor response must contain exactly one choice")
     choice = choices[0]
+    if not isinstance(choice, Mapping) or choice.get("index") != 0:
+        raise AnchorClientError("anchor response choice must have index 0")
+    if choice.get("finish_reason") not in SUPPORTED_FINISH_REASONS:
+        raise AnchorClientError("anchor response has an unsupported finish reason")
     message = choice.get("message") if isinstance(choice, Mapping) else None
     content = message.get("content") if isinstance(message, Mapping) else None
     if not isinstance(content, str) or not content.strip():
@@ -137,7 +144,7 @@ class OpenAIChatCompletionsClient:
             "seed": _seed(seed),
         }
         try:
-            return _text_response(self._client.post(payload))
+            return _text_response(self._client.post(payload), model)
         except OpenAIChatError as exc:
             raise AnchorClientError(str(exc)) from exc
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import tempfile
@@ -7,12 +8,14 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
+from unittest.mock import patch
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from compute_as_a_teacher.data.math500 import QuestionRecord  # noqa: E402
+from compute_as_a_teacher.evaluation import cli as evaluation_cli  # noqa: E402
 from compute_as_a_teacher.evaluation.artifacts import (  # noqa: E402
     publish_json,
     publish_jsonl,
@@ -139,15 +142,15 @@ def raw_config(model: ModelSpec | None = None) -> RawEvalConfig:
 
 def synthesis_config(model: ModelSpec | None = None) -> SynthesisEvalConfig:
     return SynthesisEvalConfig(
-        schema_version=1,
+        schema_version=2,
         kind="synthesis",
         protocol_version=MATH500_PROTOCOL_VERSION,
         run_name="fixture-synthesis",
         required_rollouts=8,
-        require_same_model_as_raw=True,
+        anchor_relation="same_as_raw",
         prompt=PromptSpec(
-            path="prompts/math500/synthesis_cot_v1.txt",
-            version="paper_appendix_f_cot_boxfix_v1",
+            path="prompts/math500/synthesis_cot_appendix_f_literal.txt",
+            version="paper_appendix_f_cot_literal_v1",
             prefix="",
         ),
         anchor=model or fixed_model(),
@@ -365,6 +368,97 @@ class EvaluationPipelineTests(unittest.TestCase):
                 )
             )
 
+    def test_synthesis_anchor_relation_separates_initial_and_trained_eval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            raw_run = self._write_raw_fixture_plan(root)
+            execute_plan(raw_run, ScriptedFakeBackend(fixed_model()))
+            initial_model = replace(
+                fixed_model(),
+                model_id="fixture-initial-v1",
+                revision="d" * 40,
+            )
+            trained_config = replace(
+                synthesis_config(initial_model),
+                anchor_relation="frozen_initial_for_trained_raw",
+            )
+
+            synthesis_run = root / "trained-synthesis"
+            manifest = write_synthesis_plan(
+                synthesis_run,
+                raw_run,
+                trained_config,
+                self.synthesis_template,
+            )
+            _, requests = load_plan(synthesis_run, expected_kind="synthesis")
+            self.assertEqual(manifest["model"], initial_model.to_dict())
+            self.assertEqual(
+                manifest["paper_contract"]["synthesis_anchor_relation"],
+                "frozen_initial_for_trained_raw",
+            )
+            self.assertTrue(all(request.model == initial_model for request in requests))
+
+            with self.assertRaisesRegex(EvaluationError, "exact raw policy"):
+                write_synthesis_plan(
+                    root / "invalid-initial-synthesis",
+                    raw_run,
+                    synthesis_config(initial_model),
+                    self.synthesis_template,
+                )
+            with self.assertRaisesRegex(EvaluationError, "distinct frozen"):
+                write_synthesis_plan(
+                    root / "invalid-trained-synthesis",
+                    raw_run,
+                    replace(
+                        synthesis_config(),
+                        anchor_relation="frozen_initial_for_trained_raw",
+                    ),
+                    self.synthesis_template,
+                )
+
+    def test_synthesis_dry_run_reports_and_validates_anchor_relation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            raw_run = self._write_raw_fixture_plan(root)
+            execute_plan(raw_run, ScriptedFakeBackend(fixed_model()))
+            config = replace(
+                synthesis_config(
+                    replace(
+                        fixed_model(),
+                        model_id="fixture-initial-v1",
+                        revision="d" * 40,
+                    )
+                ),
+                anchor_relation="frozen_initial_for_trained_raw",
+            )
+            args = argparse.Namespace(
+                config=root / "unused.toml",
+                raw_run_dir=raw_run,
+                run_dir=root / "unused-run",
+                dry_run=True,
+                force=False,
+            )
+
+            with patch.object(
+                evaluation_cli,
+                "load_synthesis_config",
+                return_value=config,
+            ):
+                result = evaluation_cli._synthesis_plan(args)
+            self.assertEqual(
+                result["anchor_relation"],
+                "frozen_initial_for_trained_raw",
+            )
+            self.assertTrue(result["anchor_relation_satisfied"])
+
+            with patch.object(
+                evaluation_cli,
+                "load_synthesis_config",
+                return_value=replace(config, anchor_relation="same_as_raw"),
+            ):
+                with self.assertRaisesRegex(EvaluationError, "exact raw policy"):
+                    evaluation_cli._synthesis_plan(args)
+
     def test_shuffled_verified_raw_rows_produce_same_synthesis_requests(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -475,9 +569,9 @@ class EvaluationPipelineTests(unittest.TestCase):
             build_raw_requests(self.questions, bad_raw, self.raw_template)
         bad_synthesis = replace(
             synthesis_config(),
-            require_same_model_as_raw=False,
+            anchor_relation="unbound_anchor",
         )
-        with self.assertRaisesRegex(EvaluationError, "same frozen"):
+        with self.assertRaisesRegex(EvaluationError, "invalid anchor relation"):
             build_synthesis_requests([], bad_synthesis, self.synthesis_template)
 
         with self.assertRaisesRegex(EvaluationError, "registered SHA-256"):

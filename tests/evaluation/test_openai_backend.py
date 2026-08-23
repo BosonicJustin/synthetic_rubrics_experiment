@@ -79,8 +79,9 @@ def raw_request(
 
 
 class RecordingTransport:
-    def __init__(self) -> None:
+    def __init__(self, finish_reason: str = "stop") -> None:
         self.calls: list[dict[str, Any]] = []
+        self.finish_reason = finish_reason
 
     def __call__(
         self,
@@ -107,7 +108,7 @@ class RecordingTransport:
                 {
                     "index": 0,
                     "message": {"role": "assistant", "content": r"\boxed{2}"},
-                    "finish_reason": "stop",
+                    "finish_reason": self.finish_reason,
                 }
             ],
             "usage": {"prompt_tokens": 12, "completion_tokens": 4},
@@ -131,7 +132,11 @@ class OpenAICompatibleBackendTests(unittest.TestCase):
         output = backend.generate_batch([request])[0]
 
         self.assertEqual(backend.descriptor.name, BACKEND_NAME)
-        self.assertEqual(backend.descriptor.version, BACKEND_VERSION)
+        self.assertEqual(
+            backend.descriptor.version,
+            f"{BACKEND_VERSION}+endpoint-sha256-"
+            f"{sha256_text('http://127.0.0.1:8000/v1/chat/completions')}",
+        )
         self.assertEqual(
             backend.descriptor.supported_sampling_fields,
             SUPPORTED_SAMPLING_FIELDS,
@@ -191,6 +196,27 @@ class OpenAICompatibleBackendTests(unittest.TestCase):
 
         self.assertEqual(transport.calls[0]["payload"]["temperature"], 0.0)
         self.assertNotIn("stop", transport.calls[0]["payload"])
+
+    def test_accepts_stop_or_length_and_rejects_other_finish_reasons(self) -> None:
+        model = model_spec()
+        for reason in ("stop", "length"):
+            with self.subTest(reason=reason):
+                backend = OpenAICompatibleBackend(
+                    model=model,
+                    base_url="http://localhost:8000/v1",
+                    transport=RecordingTransport(reason),
+                )
+                self.assertEqual(
+                    backend.generate_batch([raw_request(model)])[0].finish_reason,
+                    reason,
+                )
+        backend = OpenAICompatibleBackend(
+            model=model,
+            base_url="http://localhost:8000/v1",
+            transport=RecordingTransport("content_filter"),
+        )
+        with self.assertRaisesRegex(OpenAIBackendError, "finish_reason"):
+            backend.generate_batch([raw_request(model)])
 
     def test_batch_output_order_matches_request_order(self) -> None:
         model = model_spec()
@@ -268,6 +294,34 @@ class OpenAICompatibleBackendTests(unittest.TestCase):
                 transport=RecordingTransport(),
             )
         self.assertIsNone(backend.api_key)
+
+    def test_endpoint_identity_is_normalized_and_changes_resume_fingerprint(self) -> None:
+        model = model_spec()
+        first = OpenAICompatibleBackend(
+            model=model,
+            base_url="http://127.0.0.1:8000/v1/",
+            api_key="first-secret",
+            transport=RecordingTransport(),
+        )
+        equivalent = OpenAICompatibleBackend(
+            model=model,
+            base_url="http://127.0.0.1:8000/v1/chat/completions",
+            api_key="different-secret",
+            transport=RecordingTransport(),
+        )
+        other_endpoint = OpenAICompatibleBackend(
+            model=model,
+            base_url="http://127.0.0.1:9000/v1",
+            transport=RecordingTransport(),
+        )
+
+        self.assertEqual(first.descriptor.fingerprint, equivalent.descriptor.fingerprint)
+        self.assertNotEqual(
+            first.descriptor.fingerprint,
+            other_endpoint.descriptor.fingerprint,
+        )
+        self.assertNotIn("first-secret", first.descriptor.version)
+        self.assertNotIn("127.0.0.1", first.descriptor.version)
 
 
 if __name__ == "__main__":

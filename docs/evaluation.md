@@ -12,21 +12,32 @@ paper’s MATH-500 experiment:
 
 The repository includes a standard-library OpenAI-compatible adapter for an already
 served model. It does not import Transformers or vLLM, load a checkpoint, or download
-weights. Fake, external, and HTTP-endpoint results remain non-reportable unless the
-runtime and checkpoint identity can be attested.
+weights. Fake, external, and HTTP-endpoint results are unconditionally marked
+non-reportable by the current adapters; runtime and checkpoint attestation would
+require a separately versioned execution backend.
+
+The paper's raw “single” result is one rollout; this repository predeclares rollout
+0 because the paper does not name an index. Its Table 1 disagreement results average
+seven seeds, so this single-seed profile is not a Table 1 reproduction.
 
 ## Paper contract and explicit local choices
 
 The implementation follows these paper-specified choices:
 
 - group size `G = 8`;
-- the synthesizer is the same frozen initial policy used for raw rollouts;
+- the synthesizer is the frozen initial policy, π0; it matches the raw policy for
+  initial-policy evaluation, while trained-policy evaluation uses πT rollouts and
+  retains π0 as the synthesis anchor;
 - synthesis receives the rollout texts, without a separate original-question field;
 - the Appendix F CoT/reasoning synthesis prompt is versioned and hash-locked,
-  with the disclosed repair described below;
+  preserving the displayed body exactly, including `$ boxed{answer}$`;
 - Qwen3-4B uses `/no_think`, temperature `0.7`, top-p `0.8`, top-k `20`, and a
   1,536-token output cap; and
 - evaluation extracts the final boxed expression and checks string equivalence.
+
+The plan builders enforce the registered prompt, Qwen prefix and sampling profile,
+token cap, and group size before writing requests. The cross-stage preregistration
+also locks the local seeds and initial/final model relations.
 
 The paper does not publish its raw problem prompt, rollout delimiters, random seeds,
 exact string-normalization code, model revisions, tokenizer revision, chat-template
@@ -34,12 +45,23 @@ bytes, or runtime adapter. This repository therefore records the following local
 choices rather than presenting them as paper text:
 
 - `raw_math500_local_v1` is the raw prompt;
-- the paper's displayed Appendix F instruction prints `$ boxed{answer}$`; the
-  registered `paper_appendix_f_cot_boxfix_v1` prompt adds the missing backslash as
-  `$\boxed{answer}$`. This one-character repair is not presented as a byte-for-byte
-  transcription;
+- the canonical `paper_appendix_f_cot_literal_v1` prompt preserves the displayed
+  Appendix F instruction, including `$ boxed{answer}$`. The separately registered
+  `paper_appendix_f_cot_boxfix_v1` variant adds a backslash for a future sensitivity
+  protocol and is not used by this reproduction;
 - synthesis rollouts are serialized as `## RESPONSE 1` through `## RESPONSE 8`;
 - SHA-derived per-question seeds use a checked-in base seed;
+- sampling also fixes `do_sample=true`, single-beam generation, repetition penalty
+  `1.0`, and no stop strings; these values are local choices, not paper facts;
+- endpoint outputs accept only `stop` and `length` finish reasons, and boxed-answer
+  extraction has a 50,000-character safety cap; these are local failure policies;
+- Appendix I says regex extraction plus string matching but does not publish the
+  regex. `last_boxed_string_exact_v1` is therefore a disclosed balanced-brace,
+  last-`\\boxed` approximation, not a claim of byte-exact parser reproduction;
+- the literal Appendix F ending says `$ boxed{answer}$` while this implementation
+  requires `\\boxed{...}` for extraction. The canonical run fails closed on an
+  unextractable synthesis; the one-backslash prompt repair is reserved for a
+  separately preregistered sensitivity run;
 - `Qwen/Qwen3-4B` is this repository's Hugging Face Hub mapping for the paper's
   `Qwen3-4B` model label; the paper does not publish a registry ID or revision;
 - `last_boxed_string_exact_v1` strips only outer whitespace and is the primary
@@ -124,11 +146,14 @@ cp configs/evals/math500_raw.example.toml configs/evals/math500_raw.toml
 cp configs/evals/math500_synthesis.example.toml configs/evals/math500_synthesis.toml
 ```
 
-The raw and synthesis model blocks must match exactly, including provider adapter,
+The checked-in synthesis example declares `anchor_relation = "same_as_raw"`, so its
+raw and synthesis model blocks must match exactly, including provider adapter,
 model revision, tokenizer revision, chat-template SHA-256, adapter version, dtype,
-quantization, and seed-support declaration. Planning refuses floating markers such
-as `main`, `latest`, `dev`, or `required_*`, and requires the chat-template digest
-to be 64 lowercase hexadecimal characters.
+quantization, and seed-support declaration. A trained-checkpoint handoff instead
+declares `frozen_initial_for_trained_raw`, binding raw rollout requests to πT and
+synthesis requests to the training plan's frozen π0. Planning refuses floating
+markers such as `main`, `latest`, `dev`, or `required_*`, and requires the
+chat-template digest to be 64 lowercase hexadecimal characters.
 
 `chat_template_sha256` means the SHA-256 of the exact raw tokenizer chat-template
 source encoded as UTF-8. It is not a hash of any rendered prompt or message. Preserve
@@ -140,20 +165,27 @@ Writing a raw plan still does not instantiate a backend or load a model:
 ```bash
 python3 scripts/evaluate_math500.py plan-raw \
   --config configs/evals/math500_raw.toml \
-  --run-dir outputs/evals/qwen3-4b-raw
+  --run-dir outputs/evals/math500-initial-raw
 ```
+
+For the full RL experiment, stop here and create the canonical training plan and
+experiment preregistration described in the training guide before executing any raw
+requests. This prevents baseline results from influencing later training choices.
 
 The resulting `requests.jsonl` is the adapter-neutral work queue. Each request is
 keyed by a semantic task ID and includes the fully resolved model contract, message,
-sampling parameters, and deterministic seed.
+sampling parameters, and deterministic seed. `inspect-plan --run-dir <run>`
+reverifies and summarizes either kind of plan without loading labels or a model.
 
 The OpenAI-compatible adapter maps all planned messages and sampling fields and
 returns outputs keyed by both `task_id` and `request_fingerprint`. Serve the exact
-planned model name, then explicitly start or resume execution with:
+planned model name, then explicitly start or resume execution with the shipped
+adapter. This command requires `provider = "openai-compatible"` and
+`adapter_version = "openai-compatible-chat-v1"` in the model contract:
 
 ```bash
 python3 scripts/evaluate_math500.py run-openai \
-  --run-dir outputs/evals/qwen3-4b-raw \
+  --run-dir outputs/evals/math500-initial-raw \
   --base-url http://127.0.0.1:8000/v1 \
   --api-key-env CAT_EVAL_API_KEY \
   --batch-size 16
@@ -161,7 +193,9 @@ python3 scripts/evaluate_math500.py run-openai \
 
 The API rejects positional output mix-ups, a changed backend on resume, unsupported
 sampling fields, and any cached result whose request, backend, or output hash
-changed. An interrupted run can recover only a validated, same-backend, contiguous
+changed. The backend fingerprint includes a SHA-256 identity for the normalized
+chat-completions endpoint, without recording its URL or API key. An interrupted run
+can recover only a validated, same-endpoint backend, contiguous
 append-only result prefix; gaps or changes to checkpointed results fail closed. Before
 synthesis planning or scoring, a shared verifier revalidates the complete execution
 against the immutable plan, every per-task result, the result-set fingerprint, the
@@ -170,11 +204,12 @@ reportability reasons; it does not trust a stored `complete` or `non_reportable`
 flag on its own. Execution requires the explicit `run-openai` command and an endpoint
 that the user has started separately.
 
-`reportable: true` means that these provenance and locked-input checks passed. It
-does not promise byte-identical replay of stochastic sampling across runtimes or
-hardware. The model contract's `seed_support` value (`strict`, `best_effort`, or
-`none`) records the adapter's declared ability to honor per-request seeds and is
-copied into execution provenance as `seed_reproducibility`.
+The current fake, external-ingest, and OpenAI-compatible HTTP backends always emit
+`reportable: false`, even when every integrity check passes. The
+model contract's `seed_support` value (`strict`, `best_effort`, or `none`) is still
+recorded as `seed_reproducibility`, but it is a declaration rather than proof of
+runtime behavior. Reportable execution requires a new versioned backend and schema
+that attest checkpoint, tokenizer, chat template, runtime, and seed handling.
 
 ## Synthesis planning and scoring
 
@@ -184,23 +219,33 @@ After all raw results have verified execution provenance and a canonical
 ```bash
 python3 scripts/evaluate_math500.py plan-synthesis \
   --config configs/evals/math500_synthesis.toml \
-  --raw-run-dir outputs/evals/qwen3-4b-raw \
-  --run-dir outputs/evals/qwen3-4b-synthesis
+  --raw-run-dir outputs/evals/math500-initial-raw \
+  --run-dir outputs/evals/math500-initial-synthesis
 ```
 
 This should produce 500 synthesis requests, each bound to the hashes and task IDs of
 exactly eight raw rollouts. Changing a raw output invalidates the synthesis lineage.
 
-Only after generation is complete should labels be loaded:
+Execute the synthesis requests against the same frozen initial model:
+
+```bash
+python3 scripts/evaluate_math500.py run-openai \
+  --run-dir outputs/evals/math500-initial-synthesis \
+  --base-url http://127.0.0.1:8001/v1 \
+  --api-key-env CAT_ANCHOR_API_KEY \
+  --batch-size 16
+```
+
+Only after both raw and synthesis generation are complete should labels be loaded:
 
 ```bash
 python3 scripts/evaluate_math500.py score-raw \
-  --run-dir outputs/evals/qwen3-4b-raw \
+  --run-dir outputs/evals/math500-initial-raw \
   --config configs/evals/math500_scoring.toml
 
 python3 scripts/evaluate_math500.py score-synthesis \
-  --run-dir outputs/evals/qwen3-4b-synthesis \
-  --raw-run-dir outputs/evals/qwen3-4b-raw \
+  --run-dir outputs/evals/math500-initial-synthesis \
+  --raw-run-dir outputs/evals/math500-initial-raw \
   --config configs/evals/math500_scoring.toml
 ```
 
@@ -215,7 +260,7 @@ The CLI can validate complete adapter-produced response files for development:
 
 ```bash
 python3 scripts/evaluate_math500.py ingest-raw \
-  --run-dir outputs/evals/qwen3-4b-raw \
+  --run-dir outputs/evals/math500-initial-raw \
   --responses /path/to/raw-responses.jsonl
 ```
 
@@ -239,7 +284,8 @@ Coverage must exactly equal the plan. Duplicate, missing, extra, mismatched, or
 mixed-backend rows fail before publication. External ingest remains non-reportable
 because the file alone cannot attest that the declared model, tokenizer, template,
 runtime, and seed behavior produced those bytes. The HTTP adapter is also
-non-reportable because the endpoint cannot prove that identity.
+non-reportable because the endpoint cannot prove that identity. Use the identical
+schema with `ingest-synthesis` for a synthesis plan.
 
 ## Artifact layout
 

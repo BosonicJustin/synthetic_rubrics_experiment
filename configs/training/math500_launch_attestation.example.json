@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "kind": "cat_canonical_launch_manual_attestation",
+  "attested_by": "replace_with_reviewer_identity",
+  "attested_at_utc": "replace_with_utc_timestamp",
+  "reviewed_evidence_fingerprint": "replace_with_inspected_launch_evidence_fingerprint",
+  "attestations": {
+    "qualification_metrics_reviewed_and_accepted": false,
+    "kill_and_resume_verified": false,
+    "frozen_anchor_identity_and_hardware_disjointness_verified": false,
+    "anchor_context_sampling_and_seed_contract_verified": false,
+    "time_cost_and_storage_budget_approved": false
+  },
+  "evidence": {
+    "qualification_metrics_reviewed_and_accepted": "replace_with_evidence_summary",
+    "kill_and_resume_verified": "replace_with_evidence_summary",
+    "frozen_anchor_identity_and_hardware_disjointness_verified": "replace_with_evidence_summary",
+    "anchor_context_sampling_and_seed_contract_verified": "replace_with_evidence_summary",
+    "time_cost_and_storage_budget_approved": "replace_with_rates_and_projection_evidence"
+  },
+  "budget_limits": {
+    "max_wall_time_seconds": 0,
+    "max_trainer_gpu_hours": 0,
+    "max_anchor_gpu_hours": 0,
+    "max_storage_bytes": 0,
+    "max_total_cost": 0,
+    "currency": "USD",
+    "trainer_gpu_hour_rate": 0,
+    "anchor_gpu_hour_rate": 0,
+    "storage_and_network_cost": 0
+  }
+}

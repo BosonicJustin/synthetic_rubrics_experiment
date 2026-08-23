@@ -44,7 +44,28 @@ def _resolved_config_text() -> str:
         .replace("required_absolute_python_from_verl_environment", "/opt/verl/bin/python")
         .replace("required_absolute_verl_checkout", "/opt/verl/source")
         .replace("required_absolute_local_model_snapshot", "/models/qwen3-4b")
+        .replace("required_model_snapshot_tree_sha256", "d" * 64)
+        .replace("required_trainer_image_digest", "sha256:" + "e" * 64)
+        .replace("required_target_package_inventory_sha256", "f" * 64)
     )
+
+
+def _write_verl_checkpoint(checkpoint_root: Path, step: int) -> None:
+    step_dir = checkpoint_root / f"global_step_{step}"
+    actor_dir = step_dir / "actor"
+    huggingface_dir = actor_dir / "huggingface"
+    huggingface_dir.mkdir(parents=True)
+    (step_dir / "data.pt").write_bytes(b"dataloader-state")
+    (actor_dir / "fsdp_config.json").write_text(
+        json.dumps({"FSDP_version": 1, "world_size": 8}),
+        encoding="utf-8",
+    )
+    (huggingface_dir / "config.json").write_text("{}\n", encoding="utf-8")
+    for kind in ("model", "optim", "extra_state"):
+        for rank in range(8):
+            (actor_dir / f"{kind}_world_size_8_rank_{rank}.pt").write_bytes(
+                f"{kind}-{rank}".encode("ascii")
+            )
 
 
 class CheckpointAndHandoffTests(unittest.TestCase):
@@ -85,9 +106,7 @@ class CheckpointAndHandoffTests(unittest.TestCase):
         )
 
         checkpoint_root = self.run_dir / "checkpoints"
-        actor_dir = checkpoint_root / "global_step_1000" / "actor"
-        actor_dir.mkdir(parents=True)
-        (actor_dir / "model_world_size_8_rank_0.pt").write_bytes(b"actor-shard")
+        _write_verl_checkpoint(checkpoint_root, 1000)
         (checkpoint_root / "latest_checkpointed_iteration.txt").write_text(
             "1000\n", encoding="utf-8"
         )
@@ -131,6 +150,26 @@ class CheckpointAndHandoffTests(unittest.TestCase):
         with self.assertRaisesRegex(TrainingError, "Registered export checkpoint changed"):
             load_registered_checkpoint(self.run_dir)
 
+    def test_registration_rejects_export_paths_that_overlap_sources(self) -> None:
+        actor_dir = (
+            self.run_dir / "checkpoints" / "global_step_1000" / "actor"
+        )
+        unsafe = (
+            self.run_dir,
+            self.root,
+            actor_dir,
+            actor_dir.parent,
+            actor_dir / "merged",
+        )
+        for export_dir in unsafe:
+            with self.subTest(export_dir=export_dir), self.assertRaisesRegex(
+                TrainingError,
+                "Export directory must not",
+            ):
+                register_final_checkpoint(self.run_dir, export_dir)
+        self.assertFalse((self.run_dir / "checkpoint_manifest.json").exists())
+        self.assertFalse((self.run_dir / "completion.json").exists())
+
     def test_handoff_configs_load_and_target_the_registered_export(self) -> None:
         manifest, _ = register_final_checkpoint(self.run_dir, self.export_dir)
         output_dir = self.root / "evaluation"
@@ -145,12 +184,35 @@ class CheckpointAndHandoffTests(unittest.TestCase):
         export_digest = manifest["export"]["tree_sha256"]
         self.assertEqual(raw.model.model_id, "cat-trained-final")
         self.assertEqual(raw.model.revision, export_digest)
-        self.assertEqual(raw.model, synthesis.anchor)
-        self.assertEqual(handoff["evaluation_model"], raw.model.to_dict())
+        self.assertEqual(synthesis.anchor_relation, "frozen_initial_for_trained_raw")
+        self.assertEqual(synthesis.anchor.model_id, "cat-frozen-qwen3-4b")
+        self.assertEqual(synthesis.anchor.revision, "a" * 40)
+        self.assertNotEqual(raw.model, synthesis.anchor)
+        self.assertEqual(handoff["schema_version"], 2)
+        self.assertEqual(handoff["raw_policy_model"], raw.model.to_dict())
+        self.assertEqual(
+            handoff["synthesis_anchor_model"],
+            synthesis.anchor.to_dict(),
+        )
+        self.assertEqual(
+            handoff["synthesis_anchor_relation"],
+            "frozen_initial_for_trained_raw",
+        )
         self.assertEqual(handoff["checkpoint_tree_sha256"], export_digest)
         self.assertEqual(Path(handoff["checkpoint_path"]), self.export_dir.resolve())
         self.assertEqual(handoff["selection"], "fixed_final_step_without_labels")
         self.assertFalse(handoff["labels_loaded"])
+
+    def test_handoff_cannot_write_inside_a_registered_checkpoint(self) -> None:
+        register_final_checkpoint(self.run_dir, self.export_dir)
+        with self.assertRaisesRegex(TrainingError, "outside registered checkpoint"):
+            write_eval_handoff(
+                self.run_dir,
+                self.export_dir,
+                "cat-trained-final",
+                force=True,
+            )
+        load_registered_checkpoint(self.run_dir)
 
 
 if __name__ == "__main__":

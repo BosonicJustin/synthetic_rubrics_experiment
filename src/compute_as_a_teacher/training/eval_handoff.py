@@ -20,6 +20,7 @@ from compute_as_a_teacher.evaluation.schemas import ModelSpec, SamplingSpec
 from .checkpoints import load_registered_checkpoint
 from .errors import TrainingError
 from .planning import load_training_plan
+from .verl_adapter import LaunchLease, exclusive_launch
 
 
 RAW_CONFIG_NAME = "math500_trained_raw.toml"
@@ -53,14 +54,19 @@ def _sampling_toml(sampling: SamplingSpec) -> str:
     return "\n".join(lines)
 
 
-def _trained_model(plan: dict[str, Any], checkpoint: dict[str, Any], served_model: str) -> ModelSpec:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", served_model):
-        raise TrainingError("served_model must use only letters, digits, dot, underscore, and hyphen")
-    base = plan["config"]["policy"]
+def _served_model_id(value: str, name: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value):
+        raise TrainingError(
+            f"{name} must use only letters, digits, dot, underscore, and hyphen"
+        )
+    return value
+
+
+def _endpoint_model(base: dict[str, Any], model_id: str, revision: str) -> ModelSpec:
     return ModelSpec(
         provider="openai-compatible",
-        model_id=served_model,
-        revision=checkpoint["export"]["tree_sha256"],
+        model_id=model_id,
+        revision=revision,
         tokenizer_id=base["tokenizer_id"],
         tokenizer_revision=base["tokenizer_revision"],
         chat_template_sha256=base["chat_template_sha256"],
@@ -68,6 +74,36 @@ def _trained_model(plan: dict[str, Any], checkpoint: dict[str, Any], served_mode
         dtype=base["dtype"],
         quantization=base["quantization"],
         seed_support="best_effort",
+    )
+
+
+def _trained_model(
+    plan: dict[str, Any],
+    checkpoint: dict[str, Any],
+    served_model: str,
+) -> ModelSpec:
+    base = plan["config"]["policy"]
+    return _endpoint_model(
+        base,
+        _served_model_id(served_model, "served_model"),
+        checkpoint["export"]["tree_sha256"],
+    )
+
+
+def _initial_anchor_model(plan: dict[str, Any]) -> ModelSpec:
+    config = plan["config"]
+    anchor = config["anchor"]
+    base = anchor["model"]
+    if (
+        anchor.get("source") != "initial_policy"
+        or anchor.get("frozen") is not True
+        or base != config["policy"]
+    ):
+        raise TrainingError("Training plan does not bind a frozen initial-policy anchor")
+    return _endpoint_model(
+        base,
+        _served_model_id(config["runtime"]["anchor_model"], "runtime.anchor_model"),
+        base["revision"],
     )
 
 
@@ -97,16 +133,16 @@ prefix = {_quoted(prompt['prefix'])}
     return text.encode("utf-8")
 
 
-def _synthesis_toml(plan: dict[str, Any], model: ModelSpec) -> bytes:
+def _synthesis_toml(plan: dict[str, Any], anchor: ModelSpec) -> bytes:
     config = plan["config"]
     prompt = config["synthesis"]["prompt"]
     sampling = SamplingSpec.from_dict(config["synthesis"]["sampling"])
-    text = f"""schema_version = 1
+    text = f"""schema_version = 2
 kind = "synthesis"
 protocol_version = {_quoted(MATH500_PROTOCOL_VERSION)}
 run_name = {_quoted(config['run_name'] + '-trained-final-synthesis')}
 required_rollouts = 8
-require_same_model_as_raw = true
+anchor_relation = "frozen_initial_for_trained_raw"
 
 [prompt]
 path = {_quoted(prompt['path'])}
@@ -114,7 +150,7 @@ version = {_quoted(prompt['version'])}
 prefix = {_quoted(prompt['prefix'])}
 
 [anchor]
-{_model_toml(model)}
+{_model_toml(anchor)}
 
 [sampling]
 {_sampling_toml(sampling)}
@@ -128,29 +164,57 @@ def write_eval_handoff(
     served_model: str,
     *,
     force: bool = False,
+    _lease: LaunchLease | None = None,
 ) -> dict[str, Any]:
     run_dir = run_dir.resolve()
     output_dir = output_dir.resolve()
+    if _lease is None:
+        with exclusive_launch(run_dir) as lease:
+            return write_eval_handoff(
+                run_dir,
+                output_dir,
+                served_model,
+                force=force,
+                _lease=lease,
+            )
+    _lease.assert_for(run_dir)
     plan, _ = load_training_plan(run_dir)
     checkpoint, completion = load_registered_checkpoint(run_dir)
+    bound_checkpoint_roots = tuple(
+        Path(checkpoint[name]["path"]).resolve()
+        for name in ("verl_actor_checkpoint", "export")
+    )
+    if any(
+        output_dir == root or root in output_dir.parents
+        for root in bound_checkpoint_roots
+    ):
+        raise TrainingError(
+            "Evaluation handoff output must be outside registered checkpoint trees"
+        )
     if completion.get("completed_step") != plan["config"]["grpo"]["max_steps"]:
         raise TrainingError("Only the completed fixed final checkpoint can be evaluated")
-    model = _trained_model(plan, checkpoint, served_model)
-    model.assert_resolved()
-    raw_payload = _raw_toml(plan, model)
-    synthesis_payload = _synthesis_toml(plan, model)
+    raw_model = _trained_model(plan, checkpoint, served_model)
+    synthesis_anchor = _initial_anchor_model(plan)
+    raw_model.assert_resolved()
+    synthesis_anchor.assert_resolved()
+    if raw_model == synthesis_anchor:
+        raise TrainingError("Trained raw policy must differ from its initial anchor")
+    raw_payload = _raw_toml(plan, raw_model)
+    synthesis_payload = _synthesis_toml(plan, synthesis_anchor)
     raw_path = output_dir / RAW_CONFIG_NAME
     synthesis_path = output_dir / SYNTHESIS_CONFIG_NAME
     publish_bytes(raw_path, raw_payload, force=force)
     publish_bytes(synthesis_path, synthesis_payload, force=force)
     handoff = {
-        "schema_version": 1,
+        "schema_version": 2,
         "training_plan_fingerprint": plan["plan_fingerprint"],
         "completion": artifact_reference(run_dir / "completion.json"),
         "checkpoint_manifest": artifact_reference(run_dir / "checkpoint_manifest.json"),
         "checkpoint_tree_sha256": checkpoint["export"]["tree_sha256"],
         "checkpoint_path": checkpoint["export"]["path"],
-        "evaluation_model": model.to_dict(),
+        "raw_policy_model": raw_model.to_dict(),
+        "synthesis_anchor_model": synthesis_anchor.to_dict(),
+        "synthesis_anchor_relation": "frozen_initial_for_trained_raw",
         "raw_config": {
             "path": str(raw_path),
             "sha256": sha256_bytes(raw_payload),

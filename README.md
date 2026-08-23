@@ -1,16 +1,18 @@
 # Compute as a Teacher — reproduction
 
-This repository is a reproducible implementation workspace for the experiments in
-*Compute as a Teacher*. It covers pinned MATH-500 acquisition, raw and synthesis
-evaluation, and a reproducible RL-synthesis training pipeline with fixed-checkpoint
-evaluation handoff.
+This repository provides reproducible planning and contract infrastructure for the
+MATH-500 experiments in *Compute as a Teacher*. It covers pinned data acquisition,
+raw and synthesis evaluation, and RL-synthesis launch and checkpoint handoff. The
+current execution schemas do not content-attest the GPU runtime or external model
+services and always mark their artifacts scientifically non-reportable.
 
 ## Scientific boundary
 
 The experiment is **transductive/test-time training**: the same 500 MATH-500
 questions are used during training and evaluation. Reference answers and solutions
 must not be used for generation, synthesis, reward, prompt selection, checkpoint
-selection, or early stopping. They are reserved for final evaluation.
+selection, or early stopping. They are loaded only at predeclared scoring stages,
+after the corresponding generations are frozen, and must not influence training.
 
 The dataset preparation enforces that boundary with two files:
 
@@ -109,7 +111,13 @@ python3 scripts/train_math500.py prepare \
 
 See [the training guide](docs/training.md) for the no-download setup, frozen anchor
 service, safe launch and resume flow, checkpoint export, and trained-model raw and
-synthesis evaluation.
+synthesis evaluation. Before allocating GPUs, follow the staged gates in the
+[experiment plan](docs/experiment_plan.md). The training CLI also provides a
+two-phase experiment registry: preregister the initial raw plan, intended synthesis
+config, and canonical training plan before results exist, then finalize the lineage
+after the fixed checkpoint and `pi_T` evaluation plans are registered. Canonical
+execution additionally requires a content-addressed approval over all three GPU
+qualification runs, a completed manual attestation, and numeric resource ceilings.
 
 ## Pinned source
 
@@ -138,13 +146,15 @@ rendered image. Preparation preserves that source text exactly.
 configs/datasets/math500.lock.json  immutable dataset and artifact contract
 configs/evals/                       paper-profile examples and scoring config
 configs/training/                    CaT GRPO semantic training config
+docs/experiment_plan.md              preregistered stages, gates, and budget bounds
 scripts/prepare_math500.py          clean-clone entry point
 scripts/evaluate_math500.py         planning, endpoint execution, and scoring CLI
 scripts/train_math500.py            training plan, launch, and checkpoint CLI
+                                    (including target-environment preflight)
 notebooks/math500_explorer.ipynb    interactive dataset explorer
 src/compute_as_a_teacher/data/      validation, splitting, and safe question loader
 src/compute_as_a_teacher/evaluation/ plans, provenance, grading, and paired metrics
-src/compute_as_a_teacher/training/   rewards, verl bridge, plans, and checkpoints
+src/compute_as_a_teacher/training/   rewards, verl bridge, plans, checkpoints, registry
 prompts/math500/                     versioned and hash-locked prompt contracts
 tests/                              offline unit tests and local-data integrity test
 data/raw/                           ignored immutable upstream bytes
@@ -154,10 +164,12 @@ data/math500/labels.jsonl           ignored evaluation-only labels
 
 ## What comes next
 
-The infrastructure is ready for a separately provisioned model and GPU environment,
-but no training or real-model evaluation has been run in this repository. External
-anchor and inference endpoints remain explicitly non-reportable until their runtime
-and checkpoint identity can be content-attested.
+The planning and contract infrastructure is ready. A full run still requires the
+locked environment, identity checks, canaries, recovery test, and cost qualification
+in the [experiment plan](docs/experiment_plan.md). No training or real-model
+evaluation has been run. Current fake, external, HTTP, and training artifacts are
+always scientifically non-reportable; changing that requires a new versioned
+backend and schema that attest runtime and checkpoint identity.
 
 ## Dataset provenance
 

@@ -1,0 +1,21 @@
+You are tasked with aggregating multiple responses into a single, cohesive response.
+
+Below, I will provide several responses.
+
+Your goal is to identify common themes, reconcile differences, and synthesize the information into a unified response.
+
+Be sure to preserve key insights from each trace and ensure the final output is logically consistent and comprehensive.
+
+Avoid discarding unique or contradictory insights; highlight and address them where possible.
+
+{rollouts}
+
+Output Format:
+
+Provide a detailed, aggregated explanation or summary that integrates the information from the traces above, prefixed by “# SUMMARY”
+
+If there are contradictions or unresolved aspects, clearly state them and propose a way to reconcile them.
+
+Next, based on your summary and all of the prior responses, provide a new, comprehensive, complete, and unified response, prefixed by “# UNIFIED RESPONSE”.
+
+MAKE SURE TO CONCLUDE WITH THE FINAL ANSWER, prefixed by “Therefore, the final answer is: $ boxed{answer}$. I hope it is correct.” Where [answer] is just the final number or expression that solves the problem based on the aggregated reasoning.
