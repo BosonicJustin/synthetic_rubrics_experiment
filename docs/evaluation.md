@@ -93,6 +93,16 @@ solution into score rows. Tests use an explicit fixture-only scoring entry point
 fixture questions or labels always add a non-reportable reason and cannot produce a
 reportable result.
 
+The server profile enforces this boundary with mounts, not only API discipline.
+`trainer` and `evaluator` mount the single locked questions file; neither can see the
+raw snapshot or labels path. The separate network-disabled scorer mounts only the
+locked questions and labels files, with no GPU, model mount, endpoint credential, or
+W&B credential. Baseline and trained generation both finish before scoring begins,
+and baseline scoring is gated on the registered terminal handoff, so label-derived
+score artifacts do not exist during training or generation.
+Trainer preflight and launch also reject stale label-derived artifacts in the output
+mount, so the guarded workflow cannot re-enter training after scoring.
+
 ## Setup and model-free checks
 
 Prepare the pinned dataset and install the optional symbolic diagnostic:
@@ -100,7 +110,11 @@ Prepare the pinned dataset and install the optional symbolic diagnostic:
 ```bash
 python3 scripts/prepare_math500.py
 uv sync --extra notebook --extra evaluation --frozen
+source .venv/bin/activate
 ```
+
+Keep this checked-in environment active for the commands below. This matters on
+Python 3.10, where TOML support comes from the locked compatibility dependency.
 
 Inspect the available commands:
 

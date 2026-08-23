@@ -12,12 +12,17 @@ from compute_as_a_teacher.evaluation.artifacts import (
     canonical_json_bytes,
     publish_bytes,
     publish_json,
+    read_json,
     sha256_bytes,
 )
 from compute_as_a_teacher.evaluation.config import MATH500_PROTOCOL_VERSION
+from compute_as_a_teacher.evaluation.errors import EvaluationError
 from compute_as_a_teacher.evaluation.schemas import ModelSpec, SamplingSpec
 
-from .checkpoints import load_registered_checkpoint
+from .checkpoints import (
+    load_registered_checkpoint,
+    load_registered_checkpoint_artifacts,
+)
 from .errors import TrainingError
 from .planning import load_training_plan
 from .verl_adapter import LaunchLease, exclusive_launch
@@ -158,28 +163,14 @@ prefix = {_quoted(prompt['prefix'])}
     return text.encode("utf-8")
 
 
-def write_eval_handoff(
+def _handoff_artifacts(
     run_dir: Path,
     output_dir: Path,
     served_model: str,
-    *,
-    force: bool = False,
-    _lease: LaunchLease | None = None,
-) -> dict[str, Any]:
-    run_dir = run_dir.resolve()
-    output_dir = output_dir.resolve()
-    if _lease is None:
-        with exclusive_launch(run_dir) as lease:
-            return write_eval_handoff(
-                run_dir,
-                output_dir,
-                served_model,
-                force=force,
-                _lease=lease,
-            )
-    _lease.assert_for(run_dir)
-    plan, _ = load_training_plan(run_dir)
-    checkpoint, completion = load_registered_checkpoint(run_dir)
+    plan: dict[str, Any],
+    checkpoint: dict[str, Any],
+    completion: dict[str, Any],
+) -> tuple[bytes, bytes, dict[str, Any]]:
     bound_checkpoint_roots = tuple(
         Path(checkpoint[name]["path"]).resolve()
         for name in ("verl_actor_checkpoint", "export")
@@ -203,13 +194,13 @@ def write_eval_handoff(
     synthesis_payload = _synthesis_toml(plan, synthesis_anchor)
     raw_path = output_dir / RAW_CONFIG_NAME
     synthesis_path = output_dir / SYNTHESIS_CONFIG_NAME
-    publish_bytes(raw_path, raw_payload, force=force)
-    publish_bytes(synthesis_path, synthesis_payload, force=force)
     handoff = {
         "schema_version": 2,
         "training_plan_fingerprint": plan["plan_fingerprint"],
         "completion": artifact_reference(run_dir / "completion.json"),
-        "checkpoint_manifest": artifact_reference(run_dir / "checkpoint_manifest.json"),
+        "checkpoint_manifest": artifact_reference(
+            run_dir / "checkpoint_manifest.json"
+        ),
         "checkpoint_tree_sha256": checkpoint["export"]["tree_sha256"],
         "checkpoint_path": checkpoint["export"]["path"],
         "raw_policy_model": raw_model.to_dict(),
@@ -231,5 +222,89 @@ def write_eval_handoff(
         "non_reportable_reasons": completion["non_reportable_reasons"],
     }
     handoff["handoff_fingerprint"] = sha256_bytes(canonical_json_bytes(handoff))
+    return raw_payload, synthesis_payload, handoff
+
+
+def write_eval_handoff(
+    run_dir: Path,
+    output_dir: Path,
+    served_model: str,
+    *,
+    force: bool = False,
+    _lease: LaunchLease | None = None,
+) -> dict[str, Any]:
+    run_dir = run_dir.resolve()
+    output_dir = output_dir.resolve()
+    if _lease is None:
+        with exclusive_launch(run_dir) as lease:
+            return write_eval_handoff(
+                run_dir,
+                output_dir,
+                served_model,
+                force=force,
+                _lease=lease,
+            )
+    _lease.assert_for(run_dir)
+    plan, _ = load_training_plan(run_dir)
+    checkpoint, completion = load_registered_checkpoint(run_dir)
+    raw_payload, synthesis_payload, handoff = _handoff_artifacts(
+        run_dir,
+        output_dir,
+        served_model,
+        plan,
+        checkpoint,
+        completion,
+    )
+    raw_path = output_dir / RAW_CONFIG_NAME
+    synthesis_path = output_dir / SYNTHESIS_CONFIG_NAME
+    publish_bytes(raw_path, raw_payload, force=force)
+    publish_bytes(synthesis_path, synthesis_payload, force=force)
     publish_json(output_dir / EVAL_HANDOFF_NAME, handoff, force=force)
+    return handoff
+
+
+def verify_eval_handoff(
+    run_dir: Path, output_dir: Path, served_model: str
+) -> dict[str, Any]:
+    output_dir = output_dir.resolve()
+    paths = tuple(
+        output_dir / name
+        for name in (RAW_CONFIG_NAME, SYNTHESIS_CONFIG_NAME, EVAL_HANDOFF_NAME)
+    )
+    if not all(path.is_file() and not path.is_symlink() for path in paths):
+        raise TrainingError("Trained-evaluation handoff is incomplete or unsafe")
+    return write_eval_handoff(run_dir, output_dir, served_model)
+
+
+def verify_eval_handoff_artifacts(
+    run_dir: Path, output_dir: Path, served_model: str
+) -> dict[str, Any]:
+    """Verify handoff, receipt, actor, and export artifacts without opening the base model."""
+
+    run_dir = run_dir.resolve()
+    output_dir = output_dir.resolve()
+    raw_path = output_dir / RAW_CONFIG_NAME
+    synthesis_path = output_dir / SYNTHESIS_CONFIG_NAME
+    handoff_path = output_dir / EVAL_HANDOFF_NAME
+    paths = (raw_path, synthesis_path, handoff_path)
+    if not all(path.is_file() and not path.is_symlink() for path in paths):
+        raise TrainingError("Trained-evaluation handoff is incomplete or unsafe")
+    plan, _ = load_training_plan(run_dir)
+    checkpoint, completion = load_registered_checkpoint_artifacts(run_dir)
+    raw_payload, synthesis_payload, expected_handoff = _handoff_artifacts(
+        run_dir,
+        output_dir,
+        served_model,
+        plan,
+        checkpoint,
+        completion,
+    )
+    if raw_path.read_bytes() != raw_payload or synthesis_path.read_bytes() != synthesis_payload:
+        raise TrainingError("Trained-evaluation config changed")
+    try:
+        handoff = read_json(handoff_path)
+    except EvaluationError as exc:
+        raise TrainingError("Cannot read trained-evaluation handoff") from exc
+    if handoff != expected_handoff:
+        raise TrainingError("Trained-evaluation handoff changed")
     return handoff

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "python": {
+    "minimum": "3.10",
+    "maximum_exclusive": "3.11"
+  },
+  "cuda": "12.6",
+  "cudnn": 90800,
+  "runtime_uid": 10001,
+  "gpu": {
+    "count": 8,
+    "name_contains": "H100",
+    "bf16_required": true
+  },
+  "packages": {
+    "antlr4-python3-runtime": "4.13.2",
+    "latex2sympy2-extended": "1.11.0",
+    "math-verify": "0.9.0",
+    "mpmath": "1.3.0",
+    "sympy": "1.14.0",
+    "torch": "2.7.0",
+    "tomli": "2.2.1",
+    "verl": "0.5.0",
+    "vllm": "0.9.1",
+    "wandb": "0.21.1"
+  },
+  "verl_revision": "8fdc4d3f202f41461f4de9f42a637228e342668b"
+}

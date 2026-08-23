@@ -201,6 +201,10 @@ class TrainingPlanningTests(unittest.TestCase):
         )
         overrides = set(command.argv[3:])
         required = {
+            "hydra.run.dir="
+            + json.dumps(str(Path("/tmp/cat-test-run/hydra").resolve())),
+            'hydra.output_subdir=".hydra"',
+            "hydra.job.chdir=False",
             "data.train_batch_size=256",
             "actor_rollout_ref.rollout.n=8",
             "+actor_rollout_ref.rollout.seed=1729",

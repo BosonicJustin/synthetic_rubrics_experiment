@@ -495,6 +495,32 @@ def verify_dataset(
     }
 
 
+def verify_locked_questions(
+    repository_root: Path = REPOSITORY_ROOT,
+    lock_path: Path = DEFAULT_LOCK_PATH,
+) -> dict[str, Any]:
+    """Verify only the locked model-facing questions artifact."""
+
+    lock = load_dataset_lock(lock_path)
+    outputs = _require_mapping(lock.get("outputs"), "outputs")
+    question_spec = _require_mapping(outputs.get("questions"), "outputs.questions")
+    questions_path = _locked_path(repository_root, question_spec.get("path"))
+    _check_file_contract(
+        questions_path,
+        question_spec,
+        "locked MATH-500 questions",
+    )
+    questions = _load_questions(
+        questions_path,
+        expected_rows=int(question_spec["rows"]),
+    )
+    return {
+        "revision": lock["dataset"]["resolved_revision"],
+        "rows": len(questions),
+        "questions_sha256": question_spec["sha256"],
+    }
+
+
 def _load_questions(path: Path, *, expected_rows: int = 500) -> list[QuestionRecord]:
     """Parse exact `{id, problem}` records after an integrity check by the caller."""
 
@@ -582,6 +608,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Verify existing artifacts without downloading or writing.",
     )
     parser.add_argument(
+        "--verify-questions-only",
+        action="store_true",
+        help="Verify only the locked model-facing questions; do not read raw data or labels.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Intentionally replace existing files that do not match the lock.",
@@ -592,10 +623,24 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.verify_only and (args.source_file is not None or args.force or args.offline):
-        parser.error("--verify-only cannot be combined with --source-file, --force, or --offline")
+    if args.verify_only and args.verify_questions_only:
+        parser.error("Choose only one verification mode")
+    if (args.verify_only or args.verify_questions_only) and (
+        args.source_file is not None or args.force or args.offline
+    ):
+        parser.error(
+            "Verification modes cannot be combined with --source-file, --force, or --offline"
+        )
 
     try:
+        if args.verify_questions_only:
+            summary = verify_locked_questions(args.repo_root, args.lock_file)
+            print(
+                f"Verified model-facing MATH-500 questions: rows={summary['rows']} "
+                f"revision={summary['revision']}"
+            )
+            print(f"questions sha256: {summary['questions_sha256']}")
+            return 0
         if args.verify_only:
             summary = verify_dataset(args.repo_root, args.lock_file)
             action = "Verified"

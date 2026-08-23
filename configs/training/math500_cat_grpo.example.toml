@@ -1,4 +1,4 @@
-schema_version = 1
+schema_version = 2
 kind = "cat_grpo"
 protocol_version = "cat_math500_grpo_verl_v1"
 run_name = "qwen3-4b-math500-cat"
@@ -121,6 +121,20 @@ selected_checkpoint = "fixed_final_step"
 resume_mode = "auto"
 max_checkpoints = 3
 
+[tracking]
+console = true
+
+[tracking.wandb]
+enabled = false
+project = "synthetic-rubrics-experiment"
+entity = ""
+mode = "online"
+sdk_version = "0.21.1"
+api_key_env = "WANDB_API_KEY"
+resume = "allow"
+group = "math500-cat-grpo"
+tags = ["math500", "compute-as-a-teacher", "rl-synthesis"]
+
 [runtime]
 framework = "verl"
 framework_release = "0.5.0"
@@ -151,5 +165,4 @@ max_tokens_per_gpu = 16384
 dataloader_workers = 8
 # Local data-order seed; rollout and synthesis use their own base seeds above.
 seed = 42
-logger = ["console"]
 download_allowed = false

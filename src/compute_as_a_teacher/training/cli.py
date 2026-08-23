@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -12,8 +13,15 @@ from compute_as_a_teacher.evaluation.errors import EvaluationError
 from compute_as_a_teacher.evaluation.prompts import load_prompt
 
 from .config import load_training_config
-from .checkpoints import register_final_checkpoint
-from .eval_handoff import write_eval_handoff
+from .checkpoints import (
+    CHECKPOINT_MANIFEST_NAME,
+    COMPLETION_NAME,
+    MERGE_RECEIPT_NAME,
+    export_and_register_final_checkpoint,
+    load_registered_checkpoint,
+    register_final_checkpoint,
+)
+from .eval_handoff import verify_eval_handoff_artifacts, write_eval_handoff
 from .errors import TrainingError
 from .experiment_registry import (
     verify_final_experiment_registry,
@@ -220,7 +228,24 @@ def _merge(args: argparse.Namespace) -> dict[str, Any]:
         "mode": "merge_command",
         "would_execute": False,
         "argv": list(argv),
-        "note": "Run this after fixed-step training; it is not executed by this command.",
+        "note": (
+            "Preview only. Do not run this argv manually; use export-register "
+            "--execute so the guarded receipt and registration are inseparable."
+        ),
+    }
+
+
+def _inspect_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
+    manifest, completion = load_registered_checkpoint(_repo_path(args.run_dir))
+    export_path = Path(manifest["export"]["path"]).resolve()
+    if args.export_dir is not None and export_path != _repo_path(args.export_dir):
+        raise TrainingError("Registered checkpoint uses another export directory")
+    return {
+        "mode": "checkpoint_registration_verified",
+        "step": manifest["step"],
+        "export_path": str(export_path),
+        "export_tree_sha256": manifest["export"]["tree_sha256"],
+        "reportable": completion["reportable"],
     }
 
 
@@ -234,6 +259,73 @@ def _register_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
         "mode": "checkpoint_registered",
         "step": manifest["step"],
         "export_tree_sha256": manifest["export"]["tree_sha256"],
+        "reportable": completion["reportable"],
+        "non_reportable_reasons": completion["non_reportable_reasons"],
+    }
+
+
+def _export_register(args: argparse.Namespace) -> dict[str, Any]:
+    config_path = _repo_path(args.config)
+    run_dir = _repo_path(args.run_dir)
+    export_dir = (
+        args.export_dir
+        if args.export_dir.is_absolute()
+        else REPOSITORY_ROOT / args.export_dir
+    )
+    if not args.execute:
+        preview = _merge(args)
+        return {
+            **preview,
+            "mode": "guarded_export_registration",
+            "note": (
+                "Preview only. Add --execute to require a fresh export, run the exact "
+                "pinned merger argv without a shell, and immediately register it."
+            ),
+        }
+    config = load_training_config(config_path)
+    artifacts = tuple(
+        run_dir / name
+        for name in (
+            MERGE_RECEIPT_NAME,
+            CHECKPOINT_MANIFEST_NAME,
+            COMPLETION_NAME,
+        )
+    )
+    present = tuple(os.path.lexists(path) for path in artifacts)
+    if any(present):
+        if any(
+            exists and (not path.is_file() or path.is_symlink())
+            for exists, path in zip(present, artifacts, strict=True)
+        ):
+            raise TrainingError("Checkpoint registration artifacts must be regular files")
+        if not present[0]:
+            raise TrainingError(
+                "Checkpoint registration artifacts exist without a guarded merge receipt"
+            )
+        if not all(present):
+            register_final_checkpoint(run_dir, export_dir)
+        manifest, completion = load_registered_checkpoint(run_dir)
+        if Path(manifest["export"]["path"]).resolve() != export_dir.resolve():
+            raise TrainingError("Registered checkpoint uses another export directory")
+        return {
+            "mode": "checkpoint_export_registration_verified",
+            "step": manifest["step"],
+            "export_tree_sha256": manifest["export"]["tree_sha256"],
+            "merge_receipt": str(artifacts[0]),
+            "reportable": completion["reportable"],
+            "non_reportable_reasons": completion["non_reportable_reasons"],
+        }
+    manifest, completion, receipt = export_and_register_final_checkpoint(
+        config,
+        run_dir,
+        export_dir,
+    )
+    return {
+        "mode": "checkpoint_exported_and_registered",
+        "step": manifest["step"],
+        "export_tree_sha256": manifest["export"]["tree_sha256"],
+        "merge_receipt": str(run_dir / MERGE_RECEIPT_NAME),
+        "merge_argv": receipt["merge"]["argv"],
         "reportable": completion["reportable"],
         "non_reportable_reasons": completion["non_reportable_reasons"],
     }
@@ -253,6 +345,19 @@ def _plan_eval(args: argparse.Namespace) -> dict[str, Any]:
         "synthesis_config": handoff["synthesis_config"]["path"],
         "labels_loaded": False,
         "reportable": handoff["reportable"],
+    }
+
+
+def _inspect_eval_handoff(args: argparse.Namespace) -> dict[str, Any]:
+    handoff = verify_eval_handoff_artifacts(
+        _repo_path(args.run_dir),
+        _repo_path(args.output_dir),
+        args.served_model,
+    )
+    return {
+        "mode": "trained_eval_handoff_verified",
+        "checkpoint_tree_sha256": handoff["checkpoint_tree_sha256"],
+        "handoff_fingerprint": handoff["handoff_fingerprint"],
     }
 
 
@@ -613,11 +718,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     register = commands.add_parser(
         "register-checkpoint",
-        help="Content-address the merged fixed final checkpoint.",
+        help="Recover registration only from a verified guarded merge receipt.",
     )
     register.add_argument("--run-dir", type=Path, required=True)
     register.add_argument("--export-dir", type=Path, required=True)
     register.add_argument("--force", action="store_true")
+
+    inspect_checkpoint = commands.add_parser(
+        "inspect-checkpoint",
+        help="Revalidate a guarded merge receipt and registered live checkpoint.",
+    )
+    inspect_checkpoint.add_argument("--run-dir", type=Path, required=True)
+    inspect_checkpoint.add_argument("--export-dir", type=Path)
+
+    export_register = commands.add_parser(
+        "export-register",
+        help="Explicitly merge a fresh fixed checkpoint export and register it.",
+    )
+    export_register.add_argument("--config", type=Path, required=True)
+    export_register.add_argument("--run-dir", type=Path, required=True)
+    export_register.add_argument("--export-dir", type=Path, required=True)
+    export_register.add_argument("--execute", action="store_true")
 
     plan_eval = commands.add_parser(
         "plan-trained-eval",
@@ -627,6 +748,14 @@ def build_parser() -> argparse.ArgumentParser:
     plan_eval.add_argument("--output-dir", type=Path, required=True)
     plan_eval.add_argument("--served-model", required=True)
     plan_eval.add_argument("--force", action="store_true")
+
+    inspect_eval = commands.add_parser(
+        "inspect-trained-eval",
+        help="Revalidate an existing trained-evaluation handoff without creating it.",
+    )
+    inspect_eval.add_argument("--run-dir", type=Path, required=True)
+    inspect_eval.add_argument("--output-dir", type=Path, required=True)
+    inspect_eval.add_argument("--served-model", required=True)
 
     prepare_qualification = commands.add_parser(
         "prepare-qualification",
@@ -762,8 +891,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _merge(args)
         elif args.command == "register-checkpoint":
             result = _register_checkpoint(args)
+        elif args.command == "inspect-checkpoint":
+            result = _inspect_checkpoint(args)
+        elif args.command == "export-register":
+            result = _export_register(args)
         elif args.command == "plan-trained-eval":
             result = _plan_eval(args)
+        elif args.command == "inspect-trained-eval":
+            result = _inspect_eval_handoff(args)
         elif args.command == "prepare-qualification":
             result = _prepare_qualification(args)
         elif args.command == "inspect-qualification":

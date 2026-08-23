@@ -6,18 +6,42 @@ on:
 
 jobs:
   reproducibility-contracts:
-    runs-on: ubuntu-latest
+    name: reproducibility-contracts (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - run: python -m pip install uv==0.11.21
       - run: uv lock --check
-      - run: uv sync --extra evaluation --frozen
-      - run: uv run --extra evaluation --frozen python scripts/prepare_math500.py
-      - run: uv run --extra evaluation --frozen python scripts/prepare_math500.py --verify-only
-      - run: uv run --extra evaluation --frozen python -m unittest tests.test_math500 -v
-      - run: uv run --extra evaluation --frozen python -m unittest discover -s tests/evaluation -v
-      - run: uv run --extra evaluation --frozen python -m unittest discover -s tests/training -v
-      - run: uv run --extra evaluation --frozen python -m unittest tests.test_notebook -v
+      - name: Validate server Compose contract
+        env:
+          CAT_TRAINER_IMAGE: registry.invalid/cat@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          CAT_TRAINER_IMAGE_DIGEST: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          CAT_MODEL_REVISION: 0123456789abcdef0123456789abcdef01234567
+          CAT_MODEL_HOST_DIR: /tmp/cat/model/0123456789abcdef0123456789abcdef01234567
+          CAT_DATA_HOST_DIR: /tmp/cat/data
+          CAT_OUTPUT_HOST_DIR: /tmp/cat/outputs
+          CAT_CONFIG_HOST_DIR: /tmp/cat/config
+          CAT_ANCHOR_MODE: local
+          CAT_TRAINER_GPU_DEVICE_0: "0"
+          CAT_TRAINER_GPU_DEVICE_1: "1"
+          CAT_TRAINER_GPU_DEVICE_2: "2"
+          CAT_TRAINER_GPU_DEVICE_3: "3"
+          CAT_TRAINER_GPU_DEVICE_4: "4"
+          CAT_TRAINER_GPU_DEVICE_5: "5"
+          CAT_TRAINER_GPU_DEVICE_6: "6"
+          CAT_TRAINER_GPU_DEVICE_7: "7"
+          CAT_ANCHOR_GPU_DEVICE: "8"
+          CAT_TRAINED_POLICY_GPU_DEVICE: "0"
+        run: docker compose -f infra/server/compose.yaml --profile local-anchor --profile trained-policy config --quiet
+      - run: uv sync --python ${{ matrix.python-version }} --extra evaluation --frozen
+      - run: uv run --python ${{ matrix.python-version }} --frozen python -c "import sys; assert sys.version_info[:2] == tuple(map(int, '${{ matrix.python-version }}'.split('.')))"
+      - run: uv run --python ${{ matrix.python-version }} --extra evaluation --frozen python scripts/prepare_math500.py
+      - run: uv run --python ${{ matrix.python-version }} --extra evaluation --frozen python scripts/prepare_math500.py --verify-only
+      - run: uv run --python ${{ matrix.python-version }} --extra evaluation --frozen python -m unittest discover -s tests -v

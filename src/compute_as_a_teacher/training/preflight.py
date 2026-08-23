@@ -25,7 +25,12 @@ from .config import TrainingConfig
 from .errors import TrainingError
 from .planning import TRAINING_DATA_NAME
 from .rewards import compute_math_rewards, render_anchor_prompt
-from .verl_adapter import VerlCommand, verify_verl_checkout
+from .verl_adapter import (
+    VerlCommand,
+    require_label_free_training_outputs,
+    validate_tracking_readiness,
+    verify_verl_checkout,
+)
 
 
 PREFLIGHT_NAME = "preflight.json"
@@ -421,7 +426,7 @@ import platform
 import sys
 from pathlib import Path
 
-names = ["torch", "ray", "vllm", "transformers", "datasets", "hydra-core", "omegaconf", "flash-attn", "verl"]
+names = ["torch", "ray", "vllm", "transformers", "datasets", "hydra-core", "omegaconf", "flash-attn", "verl", "wandb"]
 packages = {}
 for name in names:
     try:
@@ -433,6 +438,15 @@ all_packages = sorted(
     for dist in md.distributions()
     if dist.metadata.get("Name")
 )
+wandb_imported = False
+wandb_module_version = None
+wandb_module_origin = None
+if os.environ.get("CAT_PREFLIGHT_IMPORT_WANDB") == "1":
+    import wandb
+
+    wandb_imported = True
+    wandb_module_version = getattr(wandb, "__version__", None)
+    wandb_module_origin = str(Path(wandb.__file__).resolve()) if wandb.__file__ else None
 import torch
 from compute_as_a_teacher.training.verl_dataset import JsonlRLHFDataset
 from compute_as_a_teacher.training.verl_reward import compute_score
@@ -440,6 +454,11 @@ from compute_as_a_teacher.training.verl_reward import compute_score
 spec = importlib.util.find_spec("verl")
 fsdp_worker_path = (
     Path(spec.origin).resolve().parent / "workers" / "fsdp_workers.py"
+    if spec and spec.origin
+    else None
+)
+tracking_path = (
+    Path(spec.origin).resolve().parent / "utils" / "tracking.py"
     if spec and spec.origin
     else None
 )
@@ -465,6 +484,74 @@ if fsdp_worker_path and fsdp_worker_path.is_file():
             and call.func.value.id == "optim"
         ):
             adamw_assignments += 1
+wandb_tracking = {
+    "source": str(tracking_path) if tracking_path else None,
+    "source_sha256": None,
+    "tracking_class_found": False,
+    "supported_backend_has_wandb": False,
+    "init_call_count": 0,
+    "init_keyword_names": [],
+    "init_keyword_values": {},
+    "init_positional_args": None,
+}
+if tracking_path and tracking_path.is_file():
+    tracking_bytes = tracking_path.read_bytes()
+    wandb_tracking["source_sha256"] = hashlib.sha256(tracking_bytes).hexdigest()
+    tracking_tree = ast.parse(tracking_bytes, filename=str(tracking_path))
+    tracking_class = next(
+        (
+            node
+            for node in tracking_tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "Tracking"
+        ),
+        None,
+    )
+    if tracking_class is not None:
+        wandb_tracking["tracking_class_found"] = True
+        for node in tracking_class.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == "supported_backend"
+                for target in node.targets
+            ):
+                continue
+            values = {
+                item.value
+                for item in ast.walk(node.value)
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            }
+            wandb_tracking["supported_backend_has_wandb"] = "wandb" in values
+        init_method = next(
+            (
+                node
+                for node in tracking_class.body
+                if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+            ),
+            None,
+        )
+        calls = [] if init_method is None else [
+            node
+            for node in ast.walk(init_method)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "init"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "wandb"
+        ]
+        wandb_tracking["init_call_count"] = len(calls)
+        if len(calls) == 1:
+            wandb_tracking["init_keyword_names"] = sorted(
+                keyword.arg for keyword in calls[0].keywords if keyword.arg is not None
+            )
+            wandb_tracking["init_keyword_values"] = {
+                keyword.arg: keyword.value.id
+                if isinstance(keyword.value, ast.Name)
+                else None
+                for keyword in calls[0].keywords
+                if keyword.arg is not None
+            }
+            wandb_tracking["init_positional_args"] = len(calls[0].args)
 cuda_available = torch.cuda.is_available()
 gpu_count = torch.cuda.device_count() if cuda_available else 0
 gpus = []
@@ -489,11 +576,15 @@ reward_parameters = [
 value = {
     "python": platform.python_version(),
     "executable": sys.executable,
+    "python_prefix": sys.prefix,
     "platform": platform.platform(),
     "packages": packages,
     "package_inventory": all_packages,
     "package_inventory_sha256": __import__("hashlib").sha256(json.dumps(all_packages, separators=(",", ":")).encode()).hexdigest(),
     "package_count": len(all_packages),
+    "wandb_imported": wandb_imported,
+    "wandb_module_version": wandb_module_version,
+    "wandb_module_origin": wandb_module_origin,
     "torch_cuda_version": torch.version.cuda,
     "cudnn_version": torch.backends.cudnn.version(),
     "nccl_version": torch.cuda.nccl.version() if cuda_available else None,
@@ -507,6 +598,7 @@ value = {
         "source": str(fsdp_worker_path) if fsdp_worker_path else None,
         "source_sha256": fsdp_worker_sha256,
     },
+    "wandb_tracking": wandb_tracking,
     "trainer_image_digest": os.environ.get("CAT_TRAINER_IMAGE_DIGEST"),
     "custom_modules": {
         "dataset": {
@@ -595,6 +687,72 @@ def discover_runtime_identity(
     )
 
 
+def validate_wandb_runtime(
+    config: TrainingConfig,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not config.tracking.wandb.enabled:
+        return {"enabled": False}
+    packages = result.get("packages")
+    if not isinstance(packages, dict):
+        raise TrainingError("Runtime probe returned an invalid package inventory")
+    observed_version = packages.get("wandb")
+    if observed_version != config.tracking.wandb.sdk_version:
+        raise TrainingError(
+            "Installed W&B SDK does not match tracking.wandb.sdk_version: "
+            f"expected {config.tracking.wandb.sdk_version}, found {observed_version}"
+        )
+    if (
+        result.get("wandb_imported") is not True
+        or result.get("wandb_module_version") != observed_version
+    ):
+        raise TrainingError("Target runtime could not import the pinned W&B SDK")
+    origin = result.get("wandb_module_origin")
+    python_prefix = result.get("python_prefix")
+    try:
+        if not isinstance(origin, str) or not isinstance(python_prefix, str):
+            raise ValueError
+        Path(origin).resolve().relative_to(Path(python_prefix).resolve())
+    except ValueError as exc:
+        raise TrainingError(
+            "W&B imported from outside the configured target Python environment"
+        ) from exc
+    contract = result.get("wandb_tracking")
+    expected_source = (
+        Path(config.runtime.verl_source_path) / "verl" / "utils" / "tracking.py"
+    ).resolve()
+    if (
+        not isinstance(contract, dict)
+        or contract.get("tracking_class_found") is not True
+        or contract.get("supported_backend_has_wandb") is not True
+        or contract.get("init_call_count") != 1
+        or contract.get("init_keyword_names")
+        != ["config", "name", "project", "settings"]
+        or contract.get("init_keyword_values")
+        != {
+            "project": "project_name",
+            "name": "experiment_name",
+            "config": "config",
+            "settings": "settings",
+        }
+        or contract.get("init_positional_args") != 0
+        or not isinstance(contract.get("source"), str)
+        or Path(contract["source"]).resolve() != expected_source
+        or not isinstance(contract.get("source_sha256"), str)
+        or not _SHA256.fullmatch(contract["source_sha256"])
+    ):
+        raise TrainingError(
+            "Pinned Verl W&B tracking contract no longer matches the environment adapter"
+        )
+    return {
+        "enabled": True,
+        "sdk_version": observed_version,
+        "verl_tracking_source": str(expected_source),
+        "verl_tracking_source_sha256": contract["source_sha256"],
+        "identity_via_environment": True,
+    }
+
+
 def probe_runtime(
     config: TrainingConfig,
     command: VerlCommand,
@@ -603,6 +761,8 @@ def probe_runtime(
 ) -> dict[str, Any]:
     environment = os.environ.copy()
     environment.update(command.environment)
+    if config.tracking.wandb.enabled:
+        environment["CAT_PREFLIGHT_IMPORT_WANDB"] = "1"
     result = _execute_runtime_probe(
         config.runtime.python_executable,
         Path(config.runtime.verl_source_path),
@@ -612,7 +772,11 @@ def probe_runtime(
     packages = result.get("packages")
     if not isinstance(packages, dict):
         raise TrainingError("Runtime probe returned an invalid package inventory")
-    missing = [name for name, version in packages.items() if version is None]
+    missing = [
+        name
+        for name, version in packages.items()
+        if version is None and (name != "wandb" or config.tracking.wandb.enabled)
+    ]
     if missing:
         raise TrainingError(f"Runtime packages are missing: {missing}")
     if packages.get("verl") != config.runtime.framework_release:
@@ -749,6 +913,7 @@ def probe_runtime(
     )
     if normalized_parameters != expected_parameters:
         raise TrainingError("Custom Verl reward signature does not match the adapter")
+    result["wandb_readiness"] = validate_wandb_runtime(config, result)
     return result
 
 
@@ -1182,8 +1347,15 @@ def run_preflight(
     check_anchor: bool,
     qualification_lineage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    label_isolation = require_label_free_training_outputs()
     config.assert_runnable()
     lineage = _qualification_lineage(qualification_lineage)
+    tracking = validate_tracking_readiness(
+        config,
+        command,
+        run_dir,
+        qualification_profile=(lineage["profile"]["name"] if lineage else None),
+    )
     expected_rows = lineage["profile"]["prompt_count"] if lineage else 500
     verify_verl_checkout(
         Path(config.runtime.verl_source_path), config.runtime.framework_revision
@@ -1229,6 +1401,8 @@ def run_preflight(
         "hydra_composition": hydra_composition,
         "tokenizer": tokenizer_check,
         "anchor": anchor_check,
+        "label_isolation": label_isolation,
+        "tracking": tracking,
     }
     missing = []
     if not hash_model:

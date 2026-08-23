@@ -92,23 +92,26 @@ qualification decision. Review each named gate and archive an explicit sign-off;
 ### 0. Freeze the experiment
 
 - Pin the Git commit, clean `verl` commit, trainer image digest, exact target-package
-  inventory, CUDA/driver/NCCL versions, GPU inventory, full local model-tree hash,
-  model/tokenizer revisions, and chat-template hash in the resolved config and run
-  artifacts.
+  inventory, configured CUDA/cuDNN versions, GPU inventory, full local model-tree
+  hash, model/tokenizer revisions, and chat-template hash. Record the observed host
+  driver and NCCL versions with the external run record; this protocol does not
+  independently config-pin them beyond the immutable image and provider controls.
 - Require structurally valid Qwen safetensors/index metadata, sufficient context for
   the policy and worst-case eight-rollout anchor request, repo-owned dataset/reward
   imports, and the preregistered per-GPU free-memory floor.
-- Bind the anchor startup record to the same content-locked `pi_0` snapshot, record
-  its visible devices, and prove it cannot contend with trainer devices.
+- Archive the host-validator JSON, provider allocation, and anchor startup/health
+  log for the same content-locked `pi_0` snapshot. The reviewer records this external
+  hardware evidence in the manual attestation; the current schema binds endpoint
+  canaries, not the external anchor process itself.
 - Freeze initial and final evaluation seeds. Preregister the initial raw plan,
   intended synthesis contract, and canonical training plan now; the final checkpoint
   and final evaluation plans are joined later by `finalize-experiment`.
 - Write `preregister-experiment` after the initial raw and canonical training plans
   exist but before raw results, trainer logs, rollout logs, or checkpoints exist.
 - Gate: all local identities resolve, the label firewall passes, and dependencies
-  are content-locked. Freeze configured endpoint aliases and startup records while
-  retaining the explicit scientific nonattestation of HTTP endpoint weights and
-  runtime behavior.
+  are content-locked. Freeze configured endpoint aliases and archive the external
+  startup evidence while retaining the explicit scientific nonattestation of HTTP
+  endpoint weights and runtime behavior.
 
 ### 1. Register the initial baseline
 
@@ -133,7 +136,8 @@ qualification decision. Review each named gate and archive an explicit sign-off;
   question or label.
 - Gate: zero request failures, stable endpoint identity, successful resume, and
   valid boxed extraction. Then complete raw execution, write the 500-row synthesis
-  plan, complete synthesis, and score both registered baselines once.
+  plan, and complete synthesis. Do not score yet; the labels boundary remains closed
+  until terminal training, guarded handoff, and trained-policy generation finish.
 
 ### 3. One-step training smoke
 
@@ -149,12 +153,13 @@ locked GPU environment.
 
 ### 4. Kill-and-resume smoke
 
-- Use the derived `resume_three_step` plan, terminate after a completed checkpoint,
-  restart with `resume_mode = "auto"`, merge the terminal actor, serve it, and run a
-  few raw evaluation requests.
+- Use the derived `resume_three_step` plan, terminate after the complete step-1
+  checkpoint, and restart with `resume_mode = "auto"` through step 3. This smoke
+  validates interruption and checkpoint recovery only; guarded merge/load validation
+  is performed later on the fixed canonical checkpoint.
 - Gate: the resumed step and data position are correct, the frozen anchor identity
-  is unchanged, cached artifacts validate, the merged export loads, and no concurrent
-  process can write the same run directory.
+  is unchanged, cached artifacts validate, and no concurrent process can write the
+  same run directory.
 
 ### 5. Full-shape qualification
 
@@ -180,6 +185,8 @@ locked GPU environment.
   immediately before spawning Verl.
 - Merge and register the fixed checkpoint, then evaluate `pi_T` raw rollouts and
   frozen-`pi_0` synthesis using the predeclared evaluation seeds.
+- Only after all four generation runs verify complete, start the offline scorer and
+  score the initial raw/synthesis pair and trained raw/synthesis pair exactly once.
 - Finalize and reverify the cross-stage registry after all four evaluation plans and
   the fixed checkpoint exist. It must record `pi_T` rollouts synthesized by frozen
   `pi_0`; it does not replace archival of results or scores.

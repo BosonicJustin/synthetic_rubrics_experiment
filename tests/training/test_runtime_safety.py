@@ -20,6 +20,7 @@ from compute_as_a_teacher.training.verl_adapter import (  # noqa: E402
     checkpointed_step,
     exclusive_launch,
     merge_command,
+    require_label_free_training_outputs,
     run_command_with_log,
     validate_verl_checkpoint,
     verify_verl_checkout,
@@ -71,6 +72,23 @@ def _write_checkpoint(run_dir: Path, step: int, world_size: int) -> Path:
 
 
 class CheckpointSafetyTests(unittest.TestCase):
+    def test_trainer_rejects_label_derived_artifacts_in_its_output_mount(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            scored = root / "evals/initial-raw"
+            scored.mkdir(parents=True)
+            (scored / "scores.jsonl").write_text("\n", encoding="utf-8")
+            environment = {
+                "CAT_SERVICE_ROLE": "trainer",
+                "CAT_OUTPUT_DIR": str(root),
+            }
+            with self.assertRaisesRegex(TrainingError, "label-derived artifacts"):
+                require_label_free_training_outputs(environment)
+            (scored / "scores.jsonl").unlink()
+            self.assertTrue(
+                require_label_free_training_outputs(environment)["enforced"]
+            )
+
     def test_training_cli_import_does_not_load_gpu_or_model_frameworks(self) -> None:
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(REPOSITORY_ROOT / "src")
@@ -174,18 +192,21 @@ class CheckpointSafetyTests(unittest.TestCase):
         config_owner, config = _resolved_config()
         self.addCleanup(config_owner.cleanup)
         with tempfile.TemporaryDirectory() as temporary:
-            run_dir = Path(temporary)
+            root = Path(temporary)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            export_dir = root / "export"
             with self.assertRaisesRegex(TrainingError, "Expected completed step 1000"):
                 merge_command(
                     config,
                     run_dir=run_dir,
-                    export_directory=run_dir / "export",
+                    export_directory=export_dir,
                 )
             actor_dir = _write_checkpoint(run_dir, step=1000, world_size=8)
             command = merge_command(
                 config,
                 run_dir=run_dir,
-                export_directory=run_dir / "export",
+                export_directory=export_dir,
             )
             self.assertEqual(
                 command[command.index("--local_dir") + 1],

@@ -29,22 +29,27 @@ be inserted into model prompts.
 
 ## Recreate MATH-500 from a clean clone
 
-Requirements: Python 3.11 or newer and network access to Hugging Face. The data
-preparer has no third-party Python dependencies.
+Requirements: Python 3.10 or newer, `uv` for the locked test/runtime environment,
+and network access to Hugging Face for first-time data acquisition. The data preparer
+itself has no third-party Python dependencies.
 
 ```bash
 python3 scripts/prepare_math500.py
 python3 scripts/prepare_math500.py --verify-only
-python3 -m unittest discover -s tests -v
 ```
 
-The equivalent shortcuts are `make data`, `make verify-data`, and `make test`.
-If `uv` is installed, the checked-in lock also supports:
+The equivalent data shortcuts are `make data` and `make verify-data`. Run the full
+suite in the checked-in environment so Python 3.10 receives its `tomli` compatibility
+dependency and the exact evaluator versions:
 
 ```bash
-uv sync --frozen
-uv run --frozen python scripts/prepare_math500.py
+uv sync --extra evaluation --frozen
+source .venv/bin/activate
+python -m unittest discover -s tests -v
 ```
+
+Keep that environment active for the evaluation and training commands below.
+`make test` is the equivalent locked test command and does not require activation.
 
 The preparation command is idempotent. It refuses a corrupt source or an existing
 mismatched output. `--force` is available only for an intentional replacement, and
@@ -99,8 +104,8 @@ tests.
 The training CLI compiles a strict semantic config into a pinned `verl` v0.5.0
 launch plan. It implements eight fresh current-policy rollouts, one frozen-policy
 synthesis call per question, boxed-answer agreement reward, GRPO, reward-level KL,
-and fixed final-checkpoint selection. This command performs a full dataset check
-without resolving or loading a model:
+and fixed final-checkpoint selection. This command verifies only the locked
+model-facing questions without resolving or loading a model:
 
 ```bash
 python3 scripts/train_math500.py prepare \
@@ -110,14 +115,16 @@ python3 scripts/train_math500.py prepare \
 ```
 
 See [the training guide](docs/training.md) for the no-download setup, frozen anchor
-service, safe launch and resume flow, checkpoint export, and trained-model raw and
-synthesis evaluation. Before allocating GPUs, follow the staged gates in the
-[experiment plan](docs/experiment_plan.md). The training CLI also provides a
-two-phase experiment registry: preregister the initial raw plan, intended synthesis
-config, and canonical training plan before results exist, then finalize the lineage
-after the fixed checkpoint and `pi_T` evaluation plans are registered. Canonical
-execution additionally requires a content-addressed approval over all three GPU
-qualification runs, a completed manual attestation, and numeric resource ceilings.
+service, optional restart-safe W&B tracking, safe launch and resume flow, checkpoint
+export, and trained-model raw and synthesis evaluation. Before allocating GPUs,
+follow the staged gates in the [experiment plan](docs/experiment_plan.md) and the
+exact host/container sequence in the [server runbook](docs/server.md). The training
+CLI also provides a two-phase experiment registry: preregister the initial raw plan,
+intended synthesis config, and canonical training plan before results exist, then
+finalize the lineage after the fixed checkpoint and `pi_T` evaluation plans are
+registered. Canonical execution additionally requires a content-addressed approval
+over all three GPU qualification runs, a completed manual attestation, and numeric
+resource ceilings.
 
 ## Pinned source
 

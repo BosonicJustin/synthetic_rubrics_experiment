@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+
+from compute_as_a_teacher._toml import tomllib
 
 from .errors import EvaluationError
 from .grading import SUPPORTED_GRADERS

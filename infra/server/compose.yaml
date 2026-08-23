@@ -1,0 +1,239 @@
+services:
+  anchor:
+    profiles: ["local-anchor"]
+    image: ${CAT_TRAINER_IMAGE:?set an immutable trainer image name@sha256 reference}
+    pull_policy: missing
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${CAT_ANCHOR_GPU_DEVICE:-anchor_gpu_not_configured}"]
+              capabilities: [gpu]
+    ipc: host
+    read_only: true
+    user: "10001:10001"
+    init: true
+    environment:
+      CAT_SERVICE_ROLE: anchor
+      CAT_MODEL_DIR: /mnt/models/${CAT_MODEL_REVISION:?set the full model commit SHA}
+      CUDA_VISIBLE_DEVICES: "0"
+      HF_HUB_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      XDG_CACHE_HOME: /cache
+      TRITON_CACHE_DIR: /cache/triton
+    volumes:
+      - type: bind
+        source: ${CAT_MODEL_HOST_DIR:?set the immutable model snapshot directory}
+        target: /mnt/models/${CAT_MODEL_REVISION:?set the full model commit SHA}
+        read_only: true
+    tmpfs:
+      - /tmp:exec,mode=1777
+      - /cache:exec,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 5
+    command: ["serve-anchor"]
+
+  trained-policy:
+    profiles: ["trained-policy"]
+    image: ${CAT_TRAINER_IMAGE:?set an immutable trainer image name@sha256 reference}
+    pull_policy: missing
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${CAT_TRAINED_POLICY_GPU_DEVICE:-trained_policy_gpu_not_configured}"]
+              capabilities: [gpu]
+    ipc: host
+    read_only: true
+    user: "10001:10001"
+    init: true
+    environment:
+      CAT_SERVICE_ROLE: trained-policy
+      CAT_MODEL_DIR: /mnt/models/${CAT_MODEL_REVISION:?set the full model commit SHA}
+      CUDA_VISIBLE_DEVICES: "0"
+      HF_HUB_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      XDG_CACHE_HOME: /cache
+      TRITON_CACHE_DIR: /cache/triton
+    volumes:
+      - type: bind
+        source: ${CAT_MODEL_HOST_DIR:?set the immutable model snapshot directory}
+        target: /mnt/models/${CAT_MODEL_REVISION:?set the full model commit SHA}
+        read_only: true
+      - type: bind
+        source: ${CAT_OUTPUT_HOST_DIR:?set the output directory}/exports/qwen3-4b-math500-cat-step-1000
+        target: /mnt/trained-model
+        read_only: true
+    tmpfs:
+      - /tmp:exec,mode=1777
+      - /cache:exec,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 5
+    command: ["serve-trained-policy"]
+
+  trainer:
+    image: ${CAT_TRAINER_IMAGE:?set an immutable trainer image name@sha256 reference}
+    pull_policy: missing
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids:
+                - "${CAT_TRAINER_GPU_DEVICE_0:?set trainer GPU device 0}"
+                - "${CAT_TRAINER_GPU_DEVICE_1:?set trainer GPU device 1}"
+                - "${CAT_TRAINER_GPU_DEVICE_2:?set trainer GPU device 2}"
+                - "${CAT_TRAINER_GPU_DEVICE_3:?set trainer GPU device 3}"
+                - "${CAT_TRAINER_GPU_DEVICE_4:?set trainer GPU device 4}"
+                - "${CAT_TRAINER_GPU_DEVICE_5:?set trainer GPU device 5}"
+                - "${CAT_TRAINER_GPU_DEVICE_6:?set trainer GPU device 6}"
+                - "${CAT_TRAINER_GPU_DEVICE_7:?set trainer GPU device 7}"
+              capabilities: [gpu]
+    ipc: host
+    read_only: true
+    user: "10001:10001"
+    init: true
+    environment:
+      CAT_TRAINER_IMAGE_DIGEST: ${CAT_TRAINER_IMAGE_DIGEST:?set the trainer sha256 digest}
+      CAT_TRAINER_IMAGE_REFERENCE: ${CAT_TRAINER_IMAGE:?set an immutable trainer image name@sha256 reference}
+      CAT_ANCHOR_MODE: ${CAT_ANCHOR_MODE:?set local or remote}
+      CUDA_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+      CAT_MODEL_DIR: /mnt/models/${CAT_MODEL_REVISION:?set the full model commit SHA}
+      CAT_DATA_DIR: /mnt/data
+      CAT_OUTPUT_DIR: /mnt/outputs
+      CAT_CONFIG_PATH: /mnt/config/training.toml
+      CAT_WORKFLOW_PATH: /mnt/config/workflow.toml
+      CAT_SERVICE_ROLE: trainer
+      CAT_ANCHOR_API_KEY: ${CAT_ANCHOR_API_KEY:-local-compose-no-auth}
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+      HF_HUB_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      XDG_CACHE_HOME: /mnt/outputs/cache
+      TRITON_CACHE_DIR: /mnt/outputs/cache/triton
+      WANDB_DIR: /mnt/outputs/wandb
+      WANDB_CACHE_DIR: /mnt/outputs/wandb-cache
+    volumes:
+      - type: bind
+        source: ${CAT_MODEL_HOST_DIR:?set the immutable model snapshot directory}
+        target: /mnt/models/${CAT_MODEL_REVISION:?set the full model commit SHA}
+        read_only: true
+      - type: bind
+        source: ${CAT_DATA_HOST_DIR:?set the prepared data directory}/math500/questions.jsonl
+        target: /mnt/data/math500/questions.jsonl
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CAT_OUTPUT_HOST_DIR:?set the output directory}
+        target: /mnt/outputs
+      - type: bind
+        source: ${CAT_CONFIG_HOST_DIR:?set the resolved config directory}
+        target: /mnt/config
+        read_only: true
+    tmpfs:
+      - /tmp:exec,mode=1777
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    command: ["ready"]
+
+  evaluator:
+    image: ${CAT_TRAINER_IMAGE:?set an immutable trainer image name@sha256 reference}
+    pull_policy: missing
+    read_only: true
+    user: "10001:10001"
+    init: true
+    environment:
+      CAT_TRAINER_IMAGE_DIGEST: ${CAT_TRAINER_IMAGE_DIGEST:?set the trainer sha256 digest}
+      CAT_TRAINER_IMAGE_REFERENCE: ${CAT_TRAINER_IMAGE:?set an immutable trainer image name@sha256 reference}
+      CAT_DATA_DIR: /mnt/data
+      CAT_OUTPUT_DIR: /mnt/outputs
+      CAT_CONFIG_PATH: /mnt/config/training.toml
+      CAT_WORKFLOW_PATH: /mnt/config/workflow.toml
+      CAT_SERVICE_ROLE: evaluator
+      CAT_ANCHOR_API_KEY: ${CAT_ANCHOR_API_KEY:-local-compose-no-auth}
+      CAT_TRAINED_POLICY_API_KEY: ${CAT_TRAINED_POLICY_API_KEY:-local-compose-no-auth}
+      HF_HUB_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      XDG_CACHE_HOME: /cache
+    volumes:
+      - type: bind
+        source: ${CAT_DATA_HOST_DIR:?set the prepared data directory}/math500/questions.jsonl
+        target: /mnt/data/math500/questions.jsonl
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CAT_OUTPUT_HOST_DIR:?set the output directory}
+        target: /mnt/outputs
+      - type: bind
+        source: ${CAT_CONFIG_HOST_DIR:?set the resolved config directory}
+        target: /mnt/config
+        read_only: true
+    tmpfs:
+      - /tmp:exec,mode=1777
+      - /cache:exec,mode=1777
+    command: ["workflow", "--workflow", "/mnt/config/workflow.toml", "phase", "prepare"]
+
+  scorer:
+    image: ${CAT_TRAINER_IMAGE:?set an immutable trainer image name@sha256 reference}
+    pull_policy: missing
+    network_mode: none
+    read_only: true
+    user: "10001:10001"
+    init: true
+    environment:
+      CAT_TRAINER_IMAGE_DIGEST: ${CAT_TRAINER_IMAGE_DIGEST:?set the trainer sha256 digest}
+      CAT_TRAINER_IMAGE_REFERENCE: ${CAT_TRAINER_IMAGE:?set an immutable trainer image name@sha256 reference}
+      CAT_DATA_DIR: /mnt/data
+      CAT_OUTPUT_DIR: /mnt/outputs
+      CAT_CONFIG_PATH: /mnt/config/training.toml
+      CAT_WORKFLOW_PATH: /mnt/config/workflow.toml
+      CAT_SERVICE_ROLE: scorer
+      HF_HUB_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      XDG_CACHE_HOME: /cache
+    volumes:
+      - type: bind
+        source: ${CAT_DATA_HOST_DIR:?set the prepared data directory}/math500/questions.jsonl
+        target: /mnt/data/math500/questions.jsonl
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CAT_DATA_HOST_DIR:?set the prepared data directory}/math500/labels.jsonl
+        target: /mnt/data/math500/labels.jsonl
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CAT_OUTPUT_HOST_DIR:?set the output directory}
+        target: /mnt/outputs
+      - type: bind
+        source: ${CAT_CONFIG_HOST_DIR:?set the resolved config directory}
+        target: /mnt/config
+        read_only: true
+    tmpfs:
+      - /tmp:exec,mode=1777
+      - /cache:exec,mode=1777
+    command: ["workflow", "--workflow", "/mnt/config/workflow.toml", "phase", "baseline-scoring"]

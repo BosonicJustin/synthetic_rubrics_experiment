@@ -29,8 +29,10 @@ Several implementation details are not reported by the paper. This repository
 declares them as local choices: `verl` v0.5.0 at commit
 [`8fdc4d3f202f41461f4de9f42a637228e342668b`](https://github.com/verl-project/verl/commit/8fdc4d3f202f41461f4de9f42a637228e342668b),
 sample standard deviation (`ddof=1`) with epsilon `1e-6`, zero advantages for a
-constant-reward group, PPO clip `0.2`, one PPO epoch, mini-batch size 256 sequences,
-sampled-token `kl` penalty with a fixed controller, AdamW defaults recorded in the
+constant-reward group, PPO clip `0.2`, one PPO epoch, and a mini-batch input of 256
+prompts. Pinned Verl multiplies that local choice by eight rollouts before FSDP
+sharding, yielding 2,048 response trajectories globally and 256 per rank. The
+sampled-token `kl` penalty uses a fixed controller; AdamW defaults are recorded in the
 config, checkpointing every 100 steps, and selection of the fixed step-1,000
 checkpoint. The raw problem prompt, synthesis delimiters, base seeds, registered
 boxed-string extractor, model registry identity, `do_sample=true`, single-beam
@@ -61,9 +63,15 @@ Hydra contracts.
 Prepare or verify the locked question-only dataset first:
 
 ```bash
+uv sync --extra evaluation --frozen
+source .venv/bin/activate
 python3 scripts/prepare_math500.py
 python3 scripts/prepare_math500.py --verify-only
 ```
+
+Keep this repository environment active for the planning and orchestration commands
+below. The separately configured `runtime.python_executable` remains the pinned GPU
+environment used by Verl itself.
 
 Provide these assets yourself; the training CLI never fetches them:
 
@@ -137,6 +145,45 @@ tokenizer/chat template. An invalid or unavailable anchor fails the reward batch
 closed; gold answers are not a fallback. The trainer must see exactly eight separate
 H100s, none visible to the anchor. If there is no ninth local GPU, serve the anchor
 on another host or otherwise isolated hardware and update `runtime.anchor_base_url`.
+
+## Optional W&B tracking
+
+W&B is disabled by default, so the generated Verl command uses only the console
+logger. To enable it, set `tracking.wandb.enabled = true` in the schema-v2 training
+config and provide explicit `project` and `entity` values. The configured
+`sdk_version = "0.21.1"` is a local reproducibility pin, not a setting reported by
+the paper or pinned by Verl. `group` and `tags` are optional fingerprinted metadata.
+
+For online mode, name the credential environment variable in `api_key_env` and
+export the secret only in the launch environment. For example, set
+`api_key_env = "CAT_WANDB_API_KEY"` and then:
+
+```bash
+export CAT_WANDB_API_KEY='replace-with-a-secret'
+```
+
+The credential value is injected only into the trainer process; it is not written to
+the config, command plan, manifest, preview, or preflight receipt. Enabled tracking
+is online-only: W&B 0.21.1 ignores `resume` in offline mode, so accepting that mode
+would silently create a new run after restart. Leave W&B disabled for a no-network
+run. Preflight never calls `wandb.init` or sends a telemetry request. When tracking
+is enabled, it requires a successful import of W&B 0.21.1 from the configured Python
+environment, checks the pinned Verl tracking call shape, and fails readiness if the
+named credential is unset or blank.
+
+The canonical W&B ID is `cat-` plus the first 32 hexadecimal characters of the
+immutable training-config fingerprint. Qualification IDs append `-q-<profile>` and
+also receive distinct non-reportable names, groups, and tags. The adapter fixes W&B
+resume to `allow`, so restarting the same config resumes its telemetry run while a
+changed config gets a new ID. Do not supply or generate another run ID.
+
+W&B is observability, not recovery state. The local Verl checkpoint directory,
+`latest_checkpointed_iteration.txt`, checkpoint validation, and the registered fixed
+step-1,000 export remain authoritative even if W&B is unavailable or missing events.
+Use the first executed `one_step` qualification as the live telemetry test: verify
+the expected project, entity, ID, metrics, group, and tags before proceeding. The
+`resume_three_step` qualification should then demonstrate that both the local
+checkpoint and the same W&B run continue after restart.
 
 ## Prepare and launch
 
@@ -337,27 +384,27 @@ then rerun `launch --execute` with the same preregistration and launch-approval
 arguments. The approval is reverified against its current evidence on every start.
 
 The protocol does not use labels for early stopping or checkpoint selection. A run
-is complete only when `latest_checkpointed_iteration.txt` records step 1,000. Ask
-the CLI for the exact FSDP-to-Hugging-Face export argv:
+is complete only when `latest_checkpointed_iteration.txt` records step 1,000.
+Preview the exact FSDP-to-Hugging-Face export, then use the guarded command to run
+and register it as one operation:
 
 ```bash
-python3 scripts/train_math500.py merge-command \
+python3 scripts/train_math500.py export-register \
   --config configs/training/math500_cat_grpo.toml \
   --run-dir outputs/training/math500-cat \
-  --export-dir outputs/training/math500-cat/exports/global_step_1000
-```
-
-`merge-command` only prints the command. Run that argv in the pinned `verl`
-environment, then register the export:
-
-```bash
-python3 scripts/train_math500.py register-checkpoint \
+  --export-dir outputs/exports/qwen3-4b-math500-cat-step-1000
+python3 scripts/train_math500.py export-register \
+  --config configs/training/math500_cat_grpo.toml \
   --run-dir outputs/training/math500-cat \
-  --export-dir outputs/training/math500-cat/exports/global_step_1000
+  --export-dir outputs/exports/qwen3-4b-math500-cat-step-1000 \
+  --execute
 ```
 
-Registration requires `config.json` and model weights, inventories and hashes both
-the actor checkpoint and merged export, and records fixed-step, label-free lineage.
+The export parent must already be a canonical private directory and the exact target
+must not exist. `export-register --execute` runs the pinned merger without a shell,
+uses a secret-free allowlisted environment, detects actor mutation, publishes a
+fingerprinted merge receipt, and immediately registers it. The recovery-only
+`register-checkpoint` command refuses exports without that verified receipt.
 
 ## Evaluate the trained export
 
@@ -371,23 +418,15 @@ python3 scripts/train_math500.py plan-trained-eval \
   --served-model math500-cat-final
 ```
 
-Serve `exports/global_step_1000` under that exact model name with an
-OpenAI-compatible server. Keep the frozen `pi_0` anchor service from training
-available at its separately configured URL and model name. For example, serve
-`pi_T` with:
-
-```bash
-export CAT_EVAL_API_KEY='replace-with-a-local-secret'
-HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 vllm serve \
-  outputs/training/math500-cat/exports/global_step_1000 \
-  --served-model-name math500-cat-final \
-  --host 127.0.0.1 --port 8000 \
-  --api-key "$CAT_EVAL_API_KEY"
-```
-
-The server is a separate process; the evaluation command does not fetch or load the
-export. Use the generated raw config to plan eight trained-policy samples per
-problem:
+For the reproducible server path, do not launch vLLM manually. Use the guarded
+`handoff`, host-only `trained-policy`, label-free `trained-eval-generation`, offline
+`trained-eval-scoring`, and `finalize` phases in the
+[server runbook](server.md#canonical-run-and-trained-evaluation). They revalidate
+the live receipt before service startup, keep trained `pi_T` raw generation distinct
+from frozen `pi_0` synthesis, and keep labels out of every GPU/model-bearing service.
+The lower-level commands
+below remain useful for model-free local development of evaluation artifacts. Use
+the generated raw config to plan eight trained-policy samples per problem:
 
 ```bash
 python3 scripts/evaluate_math500.py plan-raw \

@@ -1,0 +1,45 @@
+schema_version = 2
+kind = "cat_math500_server_workflow"
+
+[configs]
+# Mount this complete resolved-config directory read-only at /mnt/config.
+training = "/mnt/config/training.toml"
+raw = "/mnt/config/raw.toml"
+synthesis = "/mnt/config/synthesis.toml"
+scoring = "/mnt/config/scoring.toml"
+
+[outputs]
+root = "/mnt/outputs"
+training_run = "/mnt/outputs/training/qwen3-4b-math500-cat"
+initial_raw_run = "/mnt/outputs/evals/initial-raw"
+initial_synthesis_run = "/mnt/outputs/evals/initial-synthesis"
+preregistration = "/mnt/outputs/registry/preregistration.json"
+launch_approval = "/mnt/outputs/registry/launch-approval.json"
+manual_attestation = "/mnt/outputs/registry/manual-attestation.json"
+checkpoint_export = "/mnt/outputs/exports/qwen3-4b-math500-cat-step-1000"
+trained_eval_config_dir = "/mnt/outputs/evals/trained-configs"
+trained_raw_run = "/mnt/outputs/evals/trained-raw"
+trained_synthesis_run = "/mnt/outputs/evals/trained-synthesis"
+final_registry = "/mnt/outputs/registry/final-experiment.json"
+one_step_dir = "/mnt/outputs/qualifications/one-step"
+resume_three_step_dir = "/mnt/outputs/qualifications/resume-three-step"
+full_shape_five_step_dir = "/mnt/outputs/qualifications/full-shape-five-step"
+
+[services]
+evaluation_base_url = "http://anchor:8001/v1"
+evaluation_api_key_env = "CAT_ANCHOR_API_KEY"
+evaluation_workers = 8
+evaluation_batch_size = 16
+# Host-only command. Never run Docker or mount its socket inside the trainer.
+anchor_start_command = ["docker", "compose", "-f", "infra/server/compose.yaml", "--profile", "local-anchor", "up", "-d", "--wait", "--wait-timeout", "600", "anchor"]
+trained_policy_base_url = "http://trained-policy:8002/v1"
+trained_policy_api_key_env = "CAT_TRAINED_POLICY_API_KEY"
+trained_policy_served_model = "math500-cat-final"
+# Host-only and separate from the frozen pi_0 anchor lifecycle.
+trained_policy_start_command = ["docker", "compose", "-f", "infra/server/compose.yaml", "--profile", "trained-policy", "up", "-d", "--wait", "--wait-timeout", "600", "trained-policy"]
+
+[readiness]
+required_commands = ["git", "nvidia-smi"]
+required_environment = ["CAT_ANCHOR_API_KEY"]
+# Replace after measuring qualification checkpoint/export sizes and retain >=25% headroom.
+minimum_free_bytes = 1000000000000

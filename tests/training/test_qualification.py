@@ -30,6 +30,9 @@ def source_command() -> VerlCommand:
         "/opt/verl/bin/python",
         "-m",
         "verl.trainer.main_ppo",
+        'hydra.run.dir="/canonical/hydra"',
+        'hydra.output_subdir=".hydra"',
+        "hydra.job.chdir=False",
         'data.train_files="/canonical/math500_train.jsonl"',
         'data.val_files="/canonical/math500_train.jsonl"',
         "data.train_batch_size=256",
@@ -96,6 +99,7 @@ class QualificationPlanTests(unittest.TestCase):
     def test_profiles_change_only_operational_scale_and_are_non_reportable(self) -> None:
         command = source_command()
         allowed_changes = {
+            "hydra.run.dir",
             "data.train_files",
             "data.val_files",
             "data.train_batch_size",

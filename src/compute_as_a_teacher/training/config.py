@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import math
 import re
-import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
+
+from compute_as_a_teacher._toml import tomllib
 
 from compute_as_a_teacher.evaluation.artifacts import canonical_json_bytes, sha256_bytes
 from compute_as_a_teacher.evaluation.config import PromptSpec
@@ -23,9 +24,11 @@ from .errors import TrainingError
 
 TRAINING_PROTOCOL_VERSION = "cat_math500_grpo_verl_v1"
 TRAINING_KIND = "cat_grpo"
+TRAINING_SCHEMA_VERSION = 2
 SUPPORTED_VERL_REVISION = "8fdc4d3f202f41461f4de9f42a637228e342668b"
 SUPPORTED_VERL_RELEASE = "0.5.0"
 SUPPORTED_ADAPTER_VERSION = "cat-verl-batch-reward-v1"
+SUPPORTED_WANDB_SDK_VERSION = "0.21.1"
 
 _FORBIDDEN_CONFIG_KEYS = frozenset(
     {
@@ -181,6 +184,25 @@ class CheckpointingSpec:
     max_checkpoints: int
 
 @dataclass(frozen=True, slots=True)
+class WandbSpec:
+    enabled: bool
+    project: str
+    entity: str
+    mode: str
+    sdk_version: str
+    api_key_env: str
+    resume: str
+    group: str
+    tags: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TrackingSpec:
+    console: bool
+    wandb: WandbSpec
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSpec:
     framework: str
     framework_release: str
@@ -209,7 +231,6 @@ class RuntimeSpec:
     max_tokens_per_gpu: int
     dataloader_workers: int
     seed: int
-    logger: tuple[str, ...]
     download_allowed: bool
 
     def unresolved_reasons(self) -> tuple[str, ...]:
@@ -256,6 +277,7 @@ class TrainingConfig:
     grpo: GrpoSpec
     optimizer: OptimizerSpec
     checkpointing: CheckpointingSpec
+    tracking: TrackingSpec
     runtime: RuntimeSpec
 
     def to_dict(self) -> dict[str, Any]:
@@ -432,6 +454,98 @@ def _parse_checkpointing(value: Any) -> CheckpointingSpec:
     )
 
 
+def _optional_text(value: Any, name: str) -> str:
+    if not isinstance(value, str):
+        raise TrainingError(f"{name} must be a string")
+    if value != value.strip() or "\0" in value or "\n" in value or "\r" in value:
+        raise TrainingError(f"{name} must not contain surrounding or control whitespace")
+    return value
+
+
+def _parse_tracking(value: Any) -> TrackingSpec:
+    table = _mapping(value, "tracking")
+    _exact_keys(table, {"console", "wandb"}, "tracking")
+    console = _bool(table["console"], "tracking.console")
+    if not console:
+        raise TrainingError("tracking.console must remain enabled")
+
+    wandb = _mapping(table["wandb"], "tracking.wandb")
+    _exact_keys(
+        wandb,
+        {
+            "enabled",
+            "project",
+            "entity",
+            "mode",
+            "sdk_version",
+            "api_key_env",
+            "resume",
+            "group",
+            "tags",
+        },
+        "tracking.wandb",
+    )
+    enabled = _bool(wandb["enabled"], "tracking.wandb.enabled")
+    project = _optional_text(wandb["project"], "tracking.wandb.project")
+    entity = _optional_text(wandb["entity"], "tracking.wandb.entity")
+    mode = _text(wandb["mode"], "tracking.wandb.mode")
+    sdk_version = _text(wandb["sdk_version"], "tracking.wandb.sdk_version")
+    api_key_env = _text(wandb["api_key_env"], "tracking.wandb.api_key_env")
+    resume = _text(wandb["resume"], "tracking.wandb.resume")
+    group = _optional_text(wandb["group"], "tracking.wandb.group")
+    tags = wandb["tags"]
+    if not isinstance(tags, list) or not all(isinstance(item, str) for item in tags):
+        raise TrainingError("tracking.wandb.tags must be a list of strings")
+    if len(tags) != len(set(tags)):
+        raise TrainingError("tracking.wandb.tags must not contain duplicates")
+    if any(
+        not item
+        or item != item.strip()
+        or len(item) > 64
+        or any(character in item for character in ",\0\n\r")
+        for item in tags
+    ):
+        raise TrainingError(
+            "tracking.wandb.tags entries must be nonempty, comma-free strings of at most 64 characters"
+        )
+    if mode != "online":
+        raise TrainingError(
+            "tracking.wandb.mode must be 'online'; W&B 0.21.1 ignores resume "
+            "in offline mode"
+        )
+    if resume != "allow":
+        raise TrainingError("tracking.wandb.resume must be 'allow' for restart-safe identity")
+    if sdk_version != SUPPORTED_WANDB_SDK_VERSION:
+        raise TrainingError(
+            f"tracking.wandb.sdk_version must be {SUPPORTED_WANDB_SDK_VERSION!r}"
+        )
+    if not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,127}", api_key_env) or "WANDB" not in api_key_env:
+        raise TrainingError(
+            "tracking.wandb.api_key_env must name an uppercase W&B environment variable"
+        )
+    slug = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+    if enabled and (not slug.fullmatch(project) or not slug.fullmatch(entity)):
+        raise TrainingError(
+            "enabled W&B tracking requires explicit project and entity slugs"
+        )
+    if group and not slug.fullmatch(group):
+        raise TrainingError("tracking.wandb.group must be empty or a valid slug")
+    return TrackingSpec(
+        console=True,
+        wandb=WandbSpec(
+            enabled=enabled,
+            project=project,
+            entity=entity,
+            mode=mode,
+            sdk_version=sdk_version,
+            api_key_env=api_key_env,
+            resume=resume,
+            group=group,
+            tags=tuple(tags),
+        ),
+    )
+
+
 def _parse_runtime(value: Any) -> RuntimeSpec:
     table = _mapping(value, "runtime")
     expected = {
@@ -444,14 +558,9 @@ def _parse_runtime(value: Any) -> RuntimeSpec:
         "minimum_gpu_free_memory_fraction", "dtype",
         "rollout_engine", "tensor_parallel_size", "gpu_memory_utilization",
         "max_prompt_tokens", "max_tokens_per_gpu", "dataloader_workers", "seed",
-        "logger", "download_allowed",
+        "download_allowed",
     }
     _exact_keys(table, expected, "runtime")
-    logger = table["logger"]
-    if not isinstance(logger, list) or not logger or not all(isinstance(item, str) and item for item in logger):
-        raise TrainingError("runtime.logger must be a nonempty list of names")
-    if len(set(logger)) != len(logger):
-        raise TrainingError("runtime.logger must not contain duplicates")
     gpu_memory = _number(table["gpu_memory_utilization"], "runtime.gpu_memory_utilization", minimum=0.0)
     if not 0 < gpu_memory < 1:
         raise TrainingError("runtime.gpu_memory_utilization must be in (0, 1)")
@@ -503,7 +612,6 @@ def _parse_runtime(value: Any) -> RuntimeSpec:
         max_tokens_per_gpu=_integer(table["max_tokens_per_gpu"], "runtime.max_tokens_per_gpu", minimum=1),
         dataloader_workers=_integer(table["dataloader_workers"], "runtime.dataloader_workers"),
         seed=seed,
-        logger=tuple(logger),
         download_allowed=_bool(table["download_allowed"], "runtime.download_allowed"),
     )
 
@@ -668,19 +776,26 @@ def load_training_config(
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise TrainingError(f"Cannot read TOML config {path}: {exc}") from exc
     _reject_forbidden_keys(value)
+    if (
+        value.get("schema_version") != TRAINING_SCHEMA_VERSION
+        or value.get("kind") != TRAINING_KIND
+    ):
+        raise TrainingError(
+            f"Training config must use schema_version={TRAINING_SCHEMA_VERSION} "
+            f"and kind={TRAINING_KIND!r}"
+        )
     expected = {
         "schema_version", "kind", "protocol_version", "run_name", "questions_path",
         "dataset_lock_path", "policy", "anchor", "rollouts", "synthesis",
-        "reward", "advantage", "grpo", "optimizer", "checkpointing", "runtime",
+        "reward", "advantage", "grpo", "optimizer", "checkpointing", "tracking",
+        "runtime",
     }
     _exact_keys(value, expected, "training config")
-    if value["schema_version"] != 1 or value["kind"] != TRAINING_KIND:
-        raise TrainingError("Training config must use schema_version=1 and kind='cat_grpo'")
     protocol = _text(value["protocol_version"], "protocol_version")
     if protocol != TRAINING_PROTOCOL_VERSION:
         raise TrainingError(f"protocol_version must be {TRAINING_PROTOCOL_VERSION!r}")
     config = TrainingConfig(
-        schema_version=1,
+        schema_version=TRAINING_SCHEMA_VERSION,
         kind=TRAINING_KIND,
         protocol_version=protocol,
         run_name=_text(value["run_name"], "run_name"),
@@ -695,6 +810,7 @@ def load_training_config(
         grpo=_parse_grpo(value["grpo"]),
         optimizer=_parse_optimizer(value["optimizer"]),
         checkpointing=_parse_checkpointing(value["checkpointing"]),
+        tracking=_parse_tracking(value["tracking"]),
         runtime=_parse_runtime(value["runtime"]),
     )
     _validate_paper_profile(config)

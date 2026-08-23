@@ -29,6 +29,11 @@ from .errors import TrainingError
 LAUNCH_LOCK_NAME = ".launch.lock"
 _PROCESS_EXIT_GRACE_SECONDS = 0.25
 _PROCESS_GROUP_STOP_SECONDS = 10.0
+_WANDB_RUN_ID = re.compile(r"cat-[0-9a-f]{32}(?:-q-[a-z0-9_]+)?")
+_WANDB_SECRET_ENV = "WANDB_API_KEY"
+_LABEL_DERIVED_ARTIFACT_NAMES = frozenset(
+    {"scores.jsonl", "summary.json", "scoring_manifest.json", "final-experiment.json"}
+)
 
 
 class LaunchLease:
@@ -68,6 +73,10 @@ class VerlCommand:
     framework_revision: str
     adapter_version: str
 
+    def __post_init__(self) -> None:
+        if _WANDB_SECRET_ENV in self.environment:
+            raise TrainingError("W&B credentials must never be serialized in a command")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "argv": list(self.argv),
@@ -80,6 +89,220 @@ class VerlCommand:
     @property
     def fingerprint(self) -> str:
         return sha256_bytes(canonical_json_bytes(self.to_dict()))
+
+
+def require_label_free_training_outputs(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    source = os.environ if environment is None else environment
+    if source.get("CAT_SERVICE_ROLE", "").strip() != "trainer":
+        return {"enforced": False}
+    configured = source.get("CAT_OUTPUT_DIR", "").strip()
+    if not configured:
+        raise TrainingError("Trainer label-isolation guard requires CAT_OUTPUT_DIR")
+    root = Path(configured)
+    try:
+        canonical = root.resolve(strict=True)
+    except OSError as exc:
+        raise TrainingError("Trainer output root is missing or unreadable") from exc
+    if root.is_symlink() or canonical != root or not root.is_dir():
+        raise TrainingError("Trainer output root must be a canonical directory")
+    try:
+        found = sorted(
+            str(path)
+            for path in root.rglob("*")
+            if path.name in _LABEL_DERIVED_ARTIFACT_NAMES and os.path.lexists(path)
+        )
+    except OSError as exc:
+        raise TrainingError("Cannot inspect trainer output root for label artifacts") from exc
+    if found:
+        raise TrainingError(
+            "Trainer refuses an output root containing label-derived artifacts: "
+            f"{found}"
+        )
+    return {"enforced": True, "output_root": str(root), "artifacts_found": []}
+
+
+def canonical_wandb_run_id(config: TrainingConfig) -> str:
+    return f"cat-{config.fingerprint[:32]}"
+
+
+def qualification_wandb_run_id(canonical_run_id: str, profile_name: str) -> str:
+    if not re.fullmatch(r"cat-[0-9a-f]{32}", canonical_run_id):
+        raise TrainingError("Canonical W&B run ID has an invalid shape")
+    if not re.fullmatch(r"[a-z0-9_]+", profile_name):
+        raise TrainingError("Qualification profile name is invalid for W&B")
+    run_id = f"{canonical_run_id}-q-{profile_name}"
+    if len(run_id) > 128:
+        raise TrainingError("Qualification W&B run ID is too long")
+    return run_id
+
+
+def qualification_wandb_group(
+    source_group: str,
+    canonical_run_id: str,
+    profile_name: str,
+) -> str:
+    prefix = source_group or canonical_run_id
+    candidate = f"{prefix}-qual-{profile_name}"
+    if len(candidate) <= 128:
+        return candidate
+    suffix = sha256_bytes(canonical_json_bytes([prefix, profile_name]))[:12]
+    return f"{prefix[:80]}-qual-{profile_name[:24]}-{suffix}"
+
+
+def _wandb_tags(config: TrainingConfig, qualification_profile: str | None) -> tuple[str, ...]:
+    tags = list(config.tracking.wandb.tags)
+    if qualification_profile is not None:
+        for tag in ("qualification", "nonreportable", qualification_profile):
+            if tag not in tags:
+                tags.append(tag)
+    return tuple(tags)
+
+
+def _wandb_environment(
+    config: TrainingConfig,
+    run_dir: Path,
+    *,
+    qualification_profile: str | None = None,
+) -> dict[str, str]:
+    wandb = config.tracking.wandb
+    if not wandb.enabled:
+        return {}
+    canonical_id = canonical_wandb_run_id(config)
+    run_id = (
+        qualification_wandb_run_id(canonical_id, qualification_profile)
+        if qualification_profile is not None
+        else canonical_id
+    )
+    group = (
+        qualification_wandb_group(wandb.group, canonical_id, qualification_profile)
+        if qualification_profile is not None
+        else wandb.group
+    )
+    environment = {
+        "WANDB_DIR": str((run_dir.resolve() / "wandb").resolve()),
+        "WANDB_ENTITY": wandb.entity,
+        "WANDB_MODE": wandb.mode,
+        "WANDB_RESUME": wandb.resume,
+        "WANDB_RUN_ID": run_id,
+    }
+    if group:
+        environment["WANDB_RUN_GROUP"] = group
+    tags = _wandb_tags(config, qualification_profile)
+    if tags:
+        environment["WANDB_TAGS"] = ",".join(tags)
+    return environment
+
+
+def _override(command: VerlCommand, name: str) -> str:
+    prefix = f"{name}="
+    matches = [item[len(prefix) :] for item in command.argv[3:] if item.startswith(prefix)]
+    if len(matches) != 1:
+        raise TrainingError(f"Expected exactly one planned override for {name}")
+    return matches[0]
+
+
+def validate_tracking_readiness(
+    config: TrainingConfig,
+    command: VerlCommand,
+    run_dir: Path,
+    *,
+    qualification_profile: str | None = None,
+    source_environment: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    wandb = config.tracking.wandb
+    planned_wandb = {
+        key: value for key, value in command.environment.items() if key.startswith("WANDB_")
+    }
+    if (
+        _WANDB_SECRET_ENV in planned_wandb
+        or wandb.api_key_env in command.environment
+    ):
+        raise TrainingError("W&B API key must not appear in the planned command")
+    if not wandb.enabled:
+        if planned_wandb:
+            raise TrainingError("Disabled W&B tracking must not plan W&B environment variables")
+        return {"console": True, "wandb": {"enabled": False}}
+
+    expected_environment = _wandb_environment(
+        config,
+        run_dir,
+        qualification_profile=qualification_profile,
+    )
+    if planned_wandb != expected_environment:
+        raise TrainingError("Planned W&B environment does not match the immutable config")
+    run_id = planned_wandb["WANDB_RUN_ID"]
+    if not _WANDB_RUN_ID.fullmatch(run_id):
+        raise TrainingError("Planned W&B run ID is invalid")
+    logger = _override(command, "trainer.logger")
+    project = _override(command, "trainer.project_name")
+    experiment = _override(command, "trainer.experiment_name")
+    expected_name = (
+        f"{config.run_name}-{qualification_profile}-nonreportable"
+        if qualification_profile is not None
+        else config.run_name
+    )
+    if logger != "[console,wandb]":
+        raise TrainingError("Enabled W&B tracking requires console and wandb Verl loggers")
+    if project != _hydra_string(wandb.project):
+        raise TrainingError("Planned Verl W&B project does not match the config")
+    if experiment != _hydra_string(expected_name):
+        raise TrainingError("Planned W&B experiment name does not match the run stage")
+
+    source = os.environ if source_environment is None else source_environment
+    credential = source.get(wandb.api_key_env)
+    credential_present = isinstance(credential, str) and bool(credential) and credential == credential.strip()
+    if wandb.mode == "online" and not credential_present:
+        raise TrainingError(
+            f"W&B credential environment variable is unset or blank: {wandb.api_key_env}"
+        )
+    return {
+        "console": True,
+        "wandb": {
+            "enabled": True,
+            "project": wandb.project,
+            "entity": wandb.entity,
+            "mode": wandb.mode,
+            "sdk_version": wandb.sdk_version,
+            "run_id": run_id,
+            "resume": wandb.resume,
+            "group": planned_wandb.get("WANDB_RUN_GROUP"),
+            "tags": list(_wandb_tags(config, qualification_profile)),
+            "api_key_env": wandb.api_key_env,
+            "credential_present": credential_present,
+        },
+    }
+
+
+def build_process_environment(
+    config: TrainingConfig,
+    command: VerlCommand,
+    run_dir: Path,
+    *,
+    qualification_profile: str | None = None,
+    source_environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    source = dict(os.environ if source_environment is None else source_environment)
+    validate_tracking_readiness(
+        config,
+        command,
+        run_dir,
+        qualification_profile=qualification_profile,
+        source_environment=source,
+    )
+    wandb = config.tracking.wandb
+    credential = source.get(wandb.api_key_env) if wandb.enabled else None
+    environment = {
+        key: value for key, value in source.items() if not key.startswith("WANDB_")
+    }
+    if wandb.enabled and wandb.api_key_env != _WANDB_SECRET_ENV:
+        environment.pop(wandb.api_key_env, None)
+    environment.update(command.environment)
+    if wandb.enabled and wandb.mode == "online":
+        assert isinstance(credential, str)
+        environment[_WANDB_SECRET_ENV] = credential
+    return environment
 
 
 def build_verl_command(
@@ -98,13 +321,20 @@ def build_verl_command(
         repository_root
         / "src/compute_as_a_teacher/training/verl_reward.py"
     ).resolve()
+    hydra_dir = (run_dir / "hydra").resolve()
     checkpoints = (run_dir / "checkpoints").resolve()
     rollout_logs = (run_dir / "rollout_logs").resolve()
     rollout = config.rollouts.sampling
     synthesis = config.synthesis.sampling
     runtime = config.runtime
+    wandb = config.tracking.wandb
+    loggers = ("console", "wandb") if wandb.enabled else ("console",)
+    project_name = wandb.project if wandb.enabled else "compute-as-a-teacher"
 
     overrides = [
+        f"hydra.run.dir={_hydra_string(str(hydra_dir))}",
+        f"hydra.output_subdir={_hydra_string('.hydra')}",
+        "hydra.job.chdir=False",
         f"data.train_files={_hydra_string(str(training_data_path))}",
         f"data.val_files={_hydra_string(str(training_data_path))}",
         "data.prompt_key=prompt",
@@ -206,7 +436,7 @@ def build_verl_command(
         f"algorithm.kl_ctrl.kl_coef={config.grpo.kl_coefficient}",
         f"trainer.total_training_steps={config.grpo.max_steps}",
         f"trainer.total_epochs={config.grpo.max_steps}",
-        f"trainer.project_name={_hydra_string('compute-as-a-teacher')}",
+        f"trainer.project_name={_hydra_string(project_name)}",
         f"trainer.experiment_name={_hydra_string(config.run_name)}",
         "trainer.balance_batch=False",
         "trainer.val_before_train=False",
@@ -219,7 +449,7 @@ def build_verl_command(
         f"trainer.max_actor_ckpt_to_keep={config.checkpointing.max_checkpoints}",
         f"trainer.nnodes={runtime.nodes}",
         f"trainer.n_gpus_per_node={runtime.gpus_per_node}",
-        f"trainer.logger=[{','.join(runtime.logger)}]",
+        f"trainer.logger=[{','.join(loggers)}]",
     ]
     command = (
         runtime.python_executable,
@@ -232,8 +462,10 @@ def build_verl_command(
         "TRANSFORMERS_OFFLINE": "1",
         "HYDRA_FULL_ERROR": "1",
         "PYTHONPATH": str((repository_root / "src").resolve()),
+        "PYTHONDONTWRITEBYTECODE": "1",
         "TOKENIZERS_PARALLELISM": "true",
     }
+    environment.update(_wandb_environment(config, run_dir))
     return VerlCommand(
         argv=command,
         cwd=runtime.verl_source_path,
@@ -594,6 +826,7 @@ def launch_verl(
             return launch_verl(command, config, run_dir, lease=acquired)
     lease.assert_for(run_dir)
 
+    require_label_free_training_outputs()
     config.assert_runnable()
     world_size = config.runtime.nodes * config.runtime.gpus_per_node
     if checkpointed_step(
@@ -614,8 +847,7 @@ def launch_verl(
     verify_verl_checkout(source, command.framework_revision)
     if command.argv[0] != config.runtime.python_executable:
         raise TrainingError("Planned command Python no longer matches the config")
-    environment = os.environ.copy()
-    environment.update(command.environment)
+    environment = build_process_environment(config, command, run_dir)
     return run_command_with_log(
         command.argv,
         cwd=source,
@@ -668,9 +900,13 @@ def validate_export_destination(
     run_root = run_dir.resolve()
     actor_root = actor_checkpoint.resolve()
     export_root = export_directory.resolve()
-    if export_root == run_root or export_root in run_root.parents:
+    if (
+        export_root == run_root
+        or export_root in run_root.parents
+        or run_root in export_root.parents
+    ):
         raise TrainingError(
-            "Export directory must not equal or contain the training run directory"
+            "Export directory must not overlap the training run directory"
         )
     if (
         export_root == actor_root

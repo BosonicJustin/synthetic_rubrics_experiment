@@ -24,9 +24,13 @@ from .planning import MANIFEST_NAME, TRAINING_DATA_NAME, load_training_plan
 from .verl_adapter import (
     LaunchLease,
     VerlCommand,
+    build_process_environment,
     checkpointed_step,
     command_from_dict,
     exclusive_launches,
+    qualification_wandb_group,
+    qualification_wandb_run_id,
+    require_label_free_training_outputs,
     run_command_with_log,
     verify_verl_checkout,
 )
@@ -80,10 +84,12 @@ def derive_qualification_command(
 ) -> VerlCommand:
     qualification_dir = qualification_dir.resolve()
     data_path = qualification_dir / QUALIFICATION_DATA_NAME
+    hydra_dir = qualification_dir / "hydra"
     checkpoint_dir = qualification_dir / "checkpoints"
     rollout_dir = qualification_dir / "rollout_logs"
     argv = list(source.argv)
     replacements = {
+        "hydra.run.dir": json.dumps(str(hydra_dir), ensure_ascii=False),
         "data.train_files": json.dumps(str(data_path), ensure_ascii=False),
         "data.val_files": json.dumps(str(data_path), ensure_ascii=False),
         "data.train_batch_size": str(profile.prompt_batch_size),
@@ -114,10 +120,28 @@ def derive_qualification_command(
             "trainer.rollout_data_dir="
             + json.dumps(str(rollout_dir), ensure_ascii=False)
         )
+    environment = dict(source.environment)
+    canonical_wandb_id = environment.get("WANDB_RUN_ID")
+    if canonical_wandb_id is not None:
+        environment["WANDB_RUN_ID"] = qualification_wandb_run_id(
+            canonical_wandb_id,
+            profile.name,
+        )
+        environment["WANDB_DIR"] = str((qualification_dir / "wandb").resolve())
+        environment["WANDB_RUN_GROUP"] = qualification_wandb_group(
+            environment.get("WANDB_RUN_GROUP", ""),
+            canonical_wandb_id,
+            profile.name,
+        )
+        tags = [tag for tag in environment.get("WANDB_TAGS", "").split(",") if tag]
+        for tag in ("qualification", "nonreportable", profile.name):
+            if tag not in tags:
+                tags.append(tag)
+        environment["WANDB_TAGS"] = ",".join(tags)
     return VerlCommand(
         argv=tuple(argv),
         cwd=source.cwd,
-        environment=dict(source.environment),
+        environment=environment,
         framework_revision=source.framework_revision,
         adapter_version=source.adapter_version,
     )
@@ -402,6 +426,7 @@ def launch_qualification(
                 _locked_source_run_dir=source_run_dir,
             )
     lease.assert_for(qualification_dir)
+    require_label_free_training_outputs()
     manifest, loaded_command = load_qualification_plan(qualification_dir)
     current_source = Path(manifest["source"]["run_dir"]).resolve()
     if (
@@ -437,8 +462,12 @@ def launch_qualification(
     verify_verl_checkout(source, command.framework_revision)
     if command.argv[0] != config.runtime.python_executable or Path(command.cwd).resolve() != source:
         raise TrainingError("Qualification command runtime no longer matches the config")
-    environment = os.environ.copy()
-    environment.update(command.environment)
+    environment = build_process_environment(
+        config,
+        command,
+        qualification_dir,
+        qualification_profile=profile.name,
+    )
     return run_command_with_log(
         command.argv,
         cwd=source,

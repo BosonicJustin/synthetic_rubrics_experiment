@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import io
 import json
 import re
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -22,8 +25,10 @@ from compute_as_a_teacher.data.math500 import (  # noqa: E402
     canonical_jsonl,
     load_dataset_lock,
     load_locked_questions,
+    main,
     read_source_rows,
     verify_dataset,
+    verify_locked_questions,
 )
 
 
@@ -116,6 +121,75 @@ class Math500UnitTests(unittest.TestCase):
             questions_path.write_bytes(payload + b"tampered\n")
             with self.assertRaisesRegex(DatasetPreparationError, "checksum/size mismatch"):
                 load_locked_questions(questions_path, lock_path=lock_path)
+
+    def test_question_only_verification_never_opens_absent_raw_or_labels(self) -> None:
+        questions = [
+            {"id": f"fixture/{index}", "problem": f"Problem {index}"}
+            for index in range(500)
+        ]
+        payload = canonical_jsonl(questions)
+        lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
+        lock["outputs"]["questions"]["bytes"] = len(payload)
+        lock["outputs"]["questions"]["sha256"] = hashlib.sha256(payload).hexdigest()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            questions_path = root / lock["outputs"]["questions"]["path"]
+            lock_path = root / "math500.lock.json"
+            questions_path.parent.mkdir(parents=True)
+            questions_path.write_bytes(payload)
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
+            forbidden = {
+                (root / lock["source"]["path"]).resolve(),
+                (root / lock["outputs"]["labels"]["path"]).resolve(),
+            }
+            real_open = Path.open
+
+            def guarded_open(path: Path, *args: object, **kwargs: object):
+                if path.resolve() in forbidden:
+                    raise AssertionError(f"opened forbidden artifact: {path}")
+                return real_open(path, *args, **kwargs)
+
+            output = io.StringIO()
+            with mock.patch.object(Path, "open", guarded_open), redirect_stdout(output):
+                status = main(
+                    [
+                        "--repo-root",
+                        str(root),
+                        "--lock-file",
+                        str(lock_path),
+                        "--verify-questions-only",
+                    ]
+                )
+
+            self.assertEqual(status, 0)
+            self.assertIn("rows=500", output.getvalue())
+            self.assertFalse((root / lock["source"]["path"]).exists())
+            self.assertFalse((root / lock["outputs"]["labels"]["path"]).exists())
+
+    def test_question_only_verification_rejects_tampering(self) -> None:
+        questions = [
+            {"id": f"fixture/{index}", "problem": f"Problem {index}"}
+            for index in range(500)
+        ]
+        payload = canonical_jsonl(questions)
+        lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
+        lock["outputs"]["questions"]["bytes"] = len(payload)
+        lock["outputs"]["questions"]["sha256"] = hashlib.sha256(payload).hexdigest()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            questions_path = root / lock["outputs"]["questions"]["path"]
+            lock_path = root / "math500.lock.json"
+            questions_path.parent.mkdir(parents=True)
+            questions_path.write_bytes(payload + b"tampered\n")
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                DatasetPreparationError,
+                "checksum/size mismatch",
+            ):
+                verify_locked_questions(root, lock_path)
 
     def test_explicit_bad_mirror_is_not_hidden_by_a_valid_cache(self) -> None:
         cached_payload = b"locked source bytes\n"
