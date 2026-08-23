@@ -1,0 +1,36 @@
+schema_version = 1
+kind = "synthesis"
+protocol_version = "cat_math500_paper_v1"
+run_name = "math500-qwen3-4b-synthesis"
+required_rollouts = 8
+require_same_model_as_raw = true
+
+[prompt]
+path = "prompts/math500/synthesis_cot_v1.txt"
+version = "paper_appendix_f_cot_boxfix_v1"
+prefix = "/no_think\n"
+
+[anchor]
+# These pins must exactly equal the resolved raw-policy model block. The paper
+# uses a frozen copy of the initial policy as its synthesis anchor.
+provider = "required_provider_adapter"
+model_id = "Qwen/Qwen3-4B"
+revision = "required_immutable_revision"
+tokenizer_id = "Qwen/Qwen3-4B"
+tokenizer_revision = "required_immutable_revision"
+chat_template_sha256 = "required_sha256_of_exact_chat_template_utf8"
+adapter_version = "required_adapter_version"
+dtype = "bfloat16"
+quantization = "none"
+seed_support = "best_effort"
+
+[sampling]
+do_sample = true
+temperature = 0.7
+top_p = 0.8
+top_k = 20
+max_new_tokens = 1536
+num_beams = 1
+repetition_penalty = 1.0
+stop = []
+base_seed = 1729

@@ -1,0 +1,39 @@
+schema_version = 1
+kind = "raw"
+protocol_version = "cat_math500_paper_v1"
+run_name = "math500-qwen3-4b-raw"
+questions_path = "data/math500/questions.jsonl"
+dataset_lock_path = "configs/datasets/math500.lock.json"
+rollouts_per_problem = 8
+
+[prompt]
+path = "prompts/math500/solve_v1.txt"
+version = "raw_math500_local_v1"
+prefix = "/no_think\n"
+
+[model]
+# Replace every required_* value before writing a runnable plan. Planning with
+# --dry-run accepts these placeholders and never resolves or downloads a model.
+provider = "required_provider_adapter"
+model_id = "Qwen/Qwen3-4B"
+revision = "required_immutable_revision"
+tokenizer_id = "Qwen/Qwen3-4B"
+tokenizer_revision = "required_immutable_revision"
+chat_template_sha256 = "required_sha256_of_exact_chat_template_utf8"
+adapter_version = "required_adapter_version"
+dtype = "bfloat16"
+quantization = "none"
+seed_support = "best_effort"
+
+[sampling]
+# Temperature/top-p/top-k and the 1,536-token cap come from the paper. The
+# remaining values and base seed are explicit local protocol choices.
+do_sample = true
+temperature = 0.7
+top_p = 0.8
+top_k = 20
+max_new_tokens = 1536
+num_beams = 1
+repetition_penalty = 1.0
+stop = []
+base_seed = 1729

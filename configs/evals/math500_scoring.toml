@@ -1,0 +1,13 @@
+schema_version = 1
+kind = "scoring"
+protocol_version = "cat_math500_paper_v1"
+labels_path = "data/math500/labels.jsonl"
+dataset_lock_path = "configs/datasets/math500.lock.json"
+
+# The paper says it extracts the final boxed expression and checks string
+# equivalence, but does not publish a normalization implementation. This strict
+# version is the locked reproduction metric; math-verify is reported separately.
+primary_grader = "last_boxed_string_exact_v1"
+diagnostic_graders = ["math_verify_v0.9.0"]
+parsing_timeout_seconds = 5
+max_answer_chars = 50000

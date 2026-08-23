@@ -7,6 +7,9 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
+evaluation = [
+    "math-verify==0.9.0",
+]
 notebook = [
     "jupyterlab>=4.2,<5",
     "matplotlib>=3.8,<4",

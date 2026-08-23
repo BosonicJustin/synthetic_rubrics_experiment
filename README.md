@@ -1,9 +1,9 @@
 # Compute as a Teacher — reproduction
 
 This repository is a reproducible implementation workspace for the experiments in
-*Compute as a Teacher*. The current milestone is intentionally narrow: acquire and
-validate MATH-500, then create a label-free question view for the later raw-solution,
-synthesis, and RL-synthesis stages.
+*Compute as a Teacher*. The repository now covers two milestones: pinned MATH-500
+acquisition and model-independent infrastructure for raw-rollout and synthesis
+evaluation. RL-synthesis training remains a later milestone.
 
 ## Scientific boundary
 
@@ -67,6 +67,31 @@ uv run --extra notebook --frozen jupyter lab notebooks/math500_explorer.ipynb
 You can also use `make notebook` after syncing the optional notebook environment.
 The notebook keeps reference answers hidden unless you explicitly enable them.
 
+## Plan raw and synthesis evaluations
+
+The evaluation layer creates deterministic, provider-neutral request queues, ingests
+strictly keyed outputs, resumes atomically per task, and scores only after crossing a
+separate labels boundary. It deliberately includes no real model backend or model-run
+command, so this milestone cannot download or execute a model by itself.
+
+Start with the model-free full-dataset planning check:
+
+```bash
+python3 scripts/evaluate_math500.py plan-raw \
+  --config configs/evals/math500_raw.example.toml \
+  --run-dir outputs/evals/unused-dry-run \
+  --dry-run
+```
+
+It should report 500 problems and 4,000 raw requests without writing artifacts,
+loading labels, or resolving a model. The example config intentionally refuses a
+runnable plan until its model revision, tokenizer revision, chat-template digest,
+and adapter version are pinned.
+
+See [the evaluation guide](docs/evaluation.md) for the raw → synthesis → scoring
+workflow, paper-versus-local protocol choices, artifact schemas, and fake-backend
+tests.
+
 ## Pinned source
 
 - Repository: [`HuggingFaceH4/MATH-500`](https://huggingface.co/datasets/HuggingFaceH4/MATH-500)
@@ -92,9 +117,13 @@ rendered image. Preparation preserves that source text exactly.
 
 ```text
 configs/datasets/math500.lock.json  immutable dataset and artifact contract
+configs/evals/                       paper-profile examples and scoring config
 scripts/prepare_math500.py          clean-clone entry point
+scripts/evaluate_math500.py         model-free evaluation CLI
 notebooks/math500_explorer.ipynb    interactive dataset explorer
 src/compute_as_a_teacher/data/      validation, splitting, and safe question loader
+src/compute_as_a_teacher/evaluation/ plans, provenance, grading, and paired metrics
+prompts/math500/                     versioned and hash-locked prompt contracts
 tests/                              offline unit tests and local-data integrity test
 data/raw/                           ignored immutable upstream bytes
 data/math500/questions.jsonl        ignored label-free training input
@@ -103,13 +132,10 @@ data/math500/labels.jsonl           ignored evaluation-only labels
 
 ## What comes next
 
-Dataset acquisition is milestone 1. Later milestones will add, separately:
-
-1. raw solution generation and evaluation;
-2. multi-rollout solution synthesis and evaluation;
-3. online RL-synthesis training with fresh rollouts.
-
-Those stages are not implemented in this commit-sized milestone.
+Dataset acquisition is milestone 1; raw and synthesis evaluation infrastructure is
+milestone 2. The next implementation milestone is online RL-synthesis training with
+fresh rollouts. A real, fully attested model backend should be added as a separate
+adapter before any reportable evaluation is run.
 
 ## Dataset provenance
 
