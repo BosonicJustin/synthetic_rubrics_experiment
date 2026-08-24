@@ -22,12 +22,12 @@ from compute_as_a_teacher.evaluation.schemas import ModelSpec, SamplingSpec
 from .errors import TrainingError
 
 
-TRAINING_PROTOCOL_VERSION = "cat_math500_grpo_verl_v1"
+TRAINING_PROTOCOL_VERSION = "cat_math500_grpo_verl_v2"
 TRAINING_KIND = "cat_grpo"
 TRAINING_SCHEMA_VERSION = 2
 SUPPORTED_VERL_REVISION = "8fdc4d3f202f41461f4de9f42a637228e342668b"
 SUPPORTED_VERL_RELEASE = "0.5.0"
-SUPPORTED_ADAPTER_VERSION = "cat-verl-batch-reward-v1"
+SUPPORTED_ADAPTER_VERSION = "cat-verl-batch-reward-v2"
 SUPPORTED_WANDB_SDK_VERSION = "0.21.1"
 
 _FORBIDDEN_CONFIG_KEYS = frozenset(
@@ -664,11 +664,11 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
         extractor=PRIMARY_GRADER,
         labels_allowed=False,
         max_answer_chars=50_000,
-        invalid_anchor="fail_closed",
+        invalid_anchor="reward_zero",
     ):
         failures.append(
             "reward must use the locked 50,000-character, label-free exact boxed "
-            "agreement contract and fail closed"
+            "agreement contract and zero invalid-anchor groups"
         )
     if config.advantage != AdvantageSpec(
         kind="group_zscore",

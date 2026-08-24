@@ -32,6 +32,8 @@ def _serve_command(role: str, name: str) -> tuple[str, ...]:
         "vllm.entrypoints.openai.api_server",
         "--host",
         "0.0.0.0",
+        "--generation-config",
+        "vllm",
     )
     if role == "anchor" and name == "serve-anchor":
         return (

@@ -33,6 +33,7 @@ from .launch_approval import (
     verify_launch_approval,
     write_launch_approval,
 )
+from .metrics import ROLLOUT_LOGS_NAME, summarize_rollout_logs
 from .planning import (
     TRAINING_DATA_NAME,
     build_training_rows,
@@ -130,6 +131,13 @@ def _inspect(args: argparse.Namespace) -> dict[str, Any]:
         "framework_revision": command.framework_revision,
         "command_fingerprint": command.fingerprint,
     }
+
+
+def _metrics(args: argparse.Namespace) -> dict[str, Any]:
+    return summarize_rollout_logs(
+        _repo_path(args.run_dir) / ROLLOUT_LOGS_NAME,
+        latest_only=args.latest,
+    )
 
 
 def _launch(args: argparse.Namespace) -> dict[str, Any]:
@@ -707,6 +715,13 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = commands.add_parser("inspect", help="Verify and summarize a prepared training plan.")
     inspect.add_argument("--run-dir", type=Path, required=True)
 
+    metrics = commands.add_parser(
+        "metrics",
+        help="Print label-free reward and anchor metrics from Verl rollout logs.",
+    )
+    metrics.add_argument("--run-dir", type=Path, required=True)
+    metrics.add_argument("--latest", action="store_true")
+
     launch = commands.add_parser("launch", help="Show or explicitly execute the pinned verl command.")
     launch.add_argument("--config", type=Path, required=True)
     launch.add_argument("--run-dir", type=Path, required=True)
@@ -890,6 +905,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _prepare(args)
         elif args.command == "inspect":
             result = _inspect(args)
+        elif args.command == "metrics":
+            result = _metrics(args)
         elif args.command == "launch":
             result = _launch(args)
         elif args.command == "merge-command":

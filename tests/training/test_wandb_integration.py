@@ -213,7 +213,7 @@ class WandbIntegrationTests(unittest.TestCase):
                 cwd="/tmp",
                 environment={"WANDB_API_KEY": "secret-value"},
                 framework_revision="8fdc4d3f202f41461f4de9f42a637228e342668b",
-                adapter_version="cat-verl-batch-reward-v1",
+                adapter_version="cat-verl-batch-reward-v2",
             )
 
     def test_runtime_contract_requires_exact_sdk_and_verl_call_shape(self) -> None:

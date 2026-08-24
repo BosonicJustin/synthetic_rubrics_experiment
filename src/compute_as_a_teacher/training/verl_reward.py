@@ -28,6 +28,7 @@ from compute_as_a_teacher.evaluation.prompts import load_prompt
 from compute_as_a_teacher.training.anchor_client import (
     AnchorChatClient,
     OpenAIChatCompletionsClient,
+    completion_text,
 )
 from compute_as_a_teacher.training.errors import RewardContractError
 from compute_as_a_teacher.training.rewards import (
@@ -39,7 +40,7 @@ from compute_as_a_teacher.training.rewards import (
 )
 
 
-REWARD_CONTRACT_VERSION = "cat_math_boxed_agreement_v1"
+REWARD_CONTRACT_VERSION = "cat_math_boxed_agreement_v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +191,7 @@ def _score_group(
     seed = derive_seed(base_seed, group.question_id, "anchor", 0)
     started = perf_counter()
     try:
-        synthesized = client.complete(
+        completion = client.complete(
             model=model,
             message=anchor_prompt,
             temperature=temperature,
@@ -206,7 +207,8 @@ def _score_group(
             f"anchor client failed for question {group.question_id!r}"
         ) from exc
     latency_seconds = perf_counter() - started
-    if not isinstance(synthesized, str) or not synthesized.strip():
+    synthesized, finish_reason = completion_text(completion)
+    if not synthesized.strip():
         raise RewardContractError("anchor client returned an invalid text response")
 
     reward_result = compute_math_rewards(
@@ -226,6 +228,8 @@ def _score_group(
         "anchor_response_sha256": sha256_text(synthesized),
         "anchor_answer_sha256": anchor_answer_sha256,
         "anchor_extraction_status": reward_result.anchor_status,
+        "anchor_failure_policy": reward_result.anchor_failure_policy,
+        "anchor_finish_reason": finish_reason,
         "anchor_latency_seconds": latency_seconds,
     }
     rows: list[tuple[int, dict[str, Any]]] = []

@@ -104,6 +104,7 @@ class ContainerContractTests(unittest.TestCase):
         argv = execute.call_args.args[1]
         self.assertIn("vllm.entrypoints.openai.api_server", argv)
         self.assertIn("cat-frozen-qwen3-4b", argv)
+        self.assertEqual(argv[argv.index("--generation-config") + 1], "vllm")
         self.assertNotIn("exec", entrypoint.COMMANDS)
 
     def test_base_image_requires_a_nonplaceholder_digest(self) -> None:

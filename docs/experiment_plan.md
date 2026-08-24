@@ -174,6 +174,10 @@ locked GPU environment.
 - Gate: no OOM or anchor errors; reward/extraction, KL, loss, and gradient metrics are
   sane; p95 anchor latency does not stall workers; checkpoint/resume works; projected
   time, cost, and storage fit the approved budget with headroom.
+- Confirm the invalid-anchor rate is acceptable. An unextractable synthesized
+  pseudo-reference gives its eight-rollout group zero task rewards; the configured
+  reward-level KL term remains active, and transport or endpoint failures remain
+  fatal. Record this rate rather than silently dropping groups.
 - Complete the fail-closed manual attestation with numeric wall-time, trainer and
   anchor GPU-hour, storage, and currency ceilings. Write and reverify the canonical
   launch approval, which content-addresses all three qualification plans, preflights,

@@ -92,7 +92,7 @@ class LaunchApprovalTests(unittest.TestCase):
                 cwd="/opt/verl/source",
                 environment={"PYTHONPATH": "/repo/src"},
                 framework_revision="d" * 40,
-                adapter_version="cat-verl-batch-reward-v1",
+                adapter_version="cat-verl-batch-reward-v2",
             )
             manifest: dict[str, object] = {
                 "profile": {
@@ -168,12 +168,14 @@ class LaunchApprovalTests(unittest.TestCase):
                         "endpoint_sha256": "1" * 64,
                         "prompt_sha256": "2" * 64,
                         "response_sha256": "3" * 64,
+                        "finish_reason": "stop",
                         "anchor_extraction_status": "ok",
                         "unanimous_agreement_rewards": [1] * 8,
                         "long_context_request_accepted": True,
                         "long_context_tail_answer_preserved": True,
                         "context_prompt_sha256": "4" * 64,
                         "context_response_sha256": "5" * 64,
+                        "context_finish_reason": "stop",
                         "context_expected_answer_sha256": "6" * 64,
                     },
                 },

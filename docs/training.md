@@ -46,10 +46,12 @@ reasons and use the same 50,000-character boxed-answer safety cap. Target-runtim
 qualification must confirm the generation defaults remain unchanged.
 Appendix I does not publish its extraction regex, so the balanced-brace,
 last-`\\boxed` scanner is a disclosed local approximation. The exact Appendix F
-ending may itself produce unextractable `boxed{...}` text without a slash; canonical
-training fails closed, while the repaired prompt is reserved for a new sensitivity
-protocol. Target preflight also verifies from the pinned Verl source that the FSDP
-actor constructs AdamW.
+ending is retained, and a synthesized response without an extractable final box
+gives all eight siblings zero task reward. The configured reward-level KL term can
+still contribute to the update. Transport, schema, and endpoint failures still abort
+the batch. The repaired prompt is reserved for a new sensitivity protocol. Target
+preflight also verifies from the pinned Verl source that the FSDP actor constructs
+AdamW.
 
 The older `verl` revision is intentional. Its
 [`BatchRewardManager`](https://github.com/verl-project/verl/blob/8fdc4d3f202f41461f4de9f42a637228e342668b/verl/workers/reward_manager/batch.py)
@@ -136,15 +138,17 @@ CUDA_VISIBLE_DEVICES="$CAT_ANCHOR_GPU_ID" vllm serve \
   "/abs/path/to/snapshots/$CAT_MODEL_REVISION" \
   --served-model-name cat-frozen-qwen3-4b \
   --host 127.0.0.1 --port 8001 \
+  --generation-config vllm \
   --api-key "$CAT_ANCHOR_API_KEY"
 ```
 
 Keep the service name, endpoint, and API-key environment-variable name aligned with
 the training config. Verify that the server honors `top_k`, `seed`, and the same
-tokenizer/chat template. An invalid or unavailable anchor fails the reward batch
-closed; gold answers are not a fallback. The trainer must see exactly eight separate
-H100s, none visible to the anchor. If there is no ninth local GPU, serve the anchor
-on another host or otherwise isolated hardware and update `runtime.anchor_base_url`.
+tokenizer/chat template. An unavailable or malformed endpoint fails the reward batch;
+an unextractable synthesized answer follows the versioned zero-task-reward policy.
+Gold answers are never a fallback. The trainer must see exactly eight separate H100s,
+none visible to the anchor. If there is no ninth local GPU, serve the anchor on
+another host or otherwise isolated hardware and update `runtime.anchor_base_url`.
 
 ## Optional W&B tracking
 
@@ -184,6 +188,21 @@ Use the first executed `one_step` qualification as the live telemetry test: veri
 the expected project, entity, ID, metrics, group, and tags before proceeding. The
 `resume_three_step` qualification should then demonstrate that both the local
 checkpoint and the same W&B run continue after restart.
+
+Verl prints loss, entropy, KL, reward, advantage, response-length, timing, and
+throughput metrics to the console and sends the numeric series to W&B. The repository
+also summarizes its immutable rollout logs without loading labels:
+
+```bash
+python3 scripts/train_math500.py metrics \
+  --run-dir outputs/training/math500-cat --latest
+```
+
+That report includes task-reward mean and zero/one fractions, rollout and anchor
+extraction counts, anchor finish reasons, and anchor latency mean/p50/p95/max. There
+is intentionally no label-based validation during the fixed 1,000 training steps;
+MATH-500 accuracy is computed only from the registered final checkpoint so labels
+cannot influence checkpoint selection or stopping.
 
 ## Prepare and launch
 

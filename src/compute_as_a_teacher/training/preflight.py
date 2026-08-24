@@ -20,7 +20,7 @@ from compute_as_a_teacher.evaluation.artifacts import (
 from compute_as_a_teacher.evaluation.grading import extract_last_boxed
 from compute_as_a_teacher.evaluation.prompts import load_prompt
 
-from .anchor_client import OpenAIChatCompletionsClient
+from .anchor_client import OpenAIChatCompletionsClient, completion_text
 from .config import TrainingConfig
 from .errors import TrainingError
 from .planning import TRAINING_DATA_NAME
@@ -1171,7 +1171,7 @@ def probe_anchor(
         f"Canary response {index}: final \\boxed{{42}}" for index in range(8)
     )
     prompt = render_anchor_prompt(template, config.synthesis.prompt, rollouts)
-    response = client.complete(
+    completion = client.complete(
         model=config.runtime.anchor_model,
         message=prompt,
         temperature=config.synthesis.sampling.temperature,
@@ -1180,6 +1180,7 @@ def probe_anchor(
         max_tokens=config.synthesis.sampling.max_new_tokens,
         seed=config.synthesis.sampling.base_seed,
     )
+    response, finish_reason = completion_text(completion)
     reward = compute_math_rewards(
         rollouts,
         response,
@@ -1199,6 +1200,7 @@ def probe_anchor(
         "model": config.runtime.anchor_model,
         "prompt_sha256": sha256_text(prompt),
         "response_sha256": sha256_text(response),
+        "finish_reason": finish_reason,
         "anchor_extraction_status": reward.anchor_status,
         "unanimous_agreement_rewards": list(reward.rewards),
         "long_context_request_accepted": False,
@@ -1216,7 +1218,7 @@ def probe_anchor(
             != 1
         ):
             raise TrainingError("Anchor context canary message is invalid")
-        context_response = client.complete(
+        context_completion = client.complete(
             model=config.runtime.anchor_model,
             message=context_canary_message,
             temperature=config.synthesis.sampling.temperature,
@@ -1225,6 +1227,7 @@ def probe_anchor(
             max_tokens=config.synthesis.sampling.max_new_tokens,
             seed=config.synthesis.sampling.base_seed,
         )
+        context_response, context_finish_reason = completion_text(context_completion)
         context_extraction = extract_last_boxed(
             context_response,
             max_answer_chars=config.reward.max_answer_chars,
@@ -1242,6 +1245,7 @@ def probe_anchor(
                 "long_context_tail_answer_preserved": True,
                 "context_prompt_sha256": sha256_text(context_canary_message),
                 "context_response_sha256": sha256_text(context_response),
+                "context_finish_reason": context_finish_reason,
                 "context_expected_answer_sha256": sha256_text(
                     context_canary_expected_answer
                 ),
@@ -1262,6 +1266,7 @@ def validate_anchor_probe_result(
         value.get("model") != expected_model
         or value.get("anchor_extraction_status") != "ok"
         or value.get("unanimous_agreement_rewards") != [1] * 8
+        or value.get("finish_reason") not in {"stop", "length"}
     ):
         raise TrainingError("Anchor probe did not verify unanimous boxed agreement")
     for name in ("endpoint_sha256", "prompt_sha256", "response_sha256"):
@@ -1272,6 +1277,7 @@ def validate_anchor_probe_result(
         if (
             value.get("long_context_request_accepted") is not True
             or value.get("long_context_tail_answer_preserved") is not True
+            or value.get("context_finish_reason") not in {"stop", "length"}
         ):
             raise TrainingError("Anchor probe did not verify the long-context tail canary")
         for name in (

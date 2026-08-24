@@ -70,7 +70,7 @@ class OpenAIChatCompletionsClientTests(unittest.TestCase):
             transport=transport,
         )
 
-        text = client.complete(
+        completion = client.complete(
             model="frozen-anchor",
             message="eight rollouts only",
             temperature=0.7,
@@ -80,7 +80,8 @@ class OpenAIChatCompletionsClientTests(unittest.TestCase):
             seed=123,
         )
 
-        self.assertEqual(text, r"synthesis \boxed{42}")
+        self.assertEqual(completion.text, r"synthesis \boxed{42}")
+        self.assertEqual(completion.finish_reason, "stop")
         self.assertEqual(len(transport.calls), 1)
         call = transport.calls[0]
         self.assertEqual(call["url"], "http://127.0.0.1:8000/v1/chat/completions")
@@ -123,18 +124,17 @@ class OpenAIChatCompletionsClientTests(unittest.TestCase):
             timeout_seconds=5,
             transport=transport,
         )
-        self.assertEqual(
-            client.complete(
-                model="anchor",
-                message="prompt",
-                temperature=0.7,
-                top_p=0.8,
-                top_k=20,
-                max_tokens=1536,
-                seed=1,
-            ),
-            r"\boxed{1}",
+        completion = client.complete(
+            model="anchor",
+            message="prompt",
+            temperature=0.7,
+            top_p=0.8,
+            top_k=20,
+            max_tokens=1536,
+            seed=1,
         )
+        self.assertEqual(completion.text, r"\boxed{1}")
+        self.assertEqual(completion.finish_reason, "length")
 
     def test_environment_key_is_read_at_construction_not_stored_by_name(self) -> None:
         transport = RecordingTransport(

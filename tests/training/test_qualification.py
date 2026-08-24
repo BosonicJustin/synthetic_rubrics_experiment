@@ -62,7 +62,7 @@ def source_command() -> VerlCommand:
         cwd="/opt/verl/source",
         environment={"HF_HUB_OFFLINE": "1"},
         framework_revision=SUPPORTED_VERL_REVISION,
-        adapter_version="cat-verl-batch-reward-v1",
+        adapter_version="cat-verl-batch-reward-v2",
     )
 
 

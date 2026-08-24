@@ -23,6 +23,12 @@ class AnchorClientError(RewardContractError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class AnchorCompletion:
+    text: str
+    finish_reason: str
+
+
 class AnchorChatClient(Protocol):
     def complete(
         self,
@@ -34,7 +40,7 @@ class AnchorChatClient(Protocol):
         top_k: int,
         max_tokens: int,
         seed: int,
-    ) -> str:
+    ) -> str | AnchorCompletion:
         ...
 
 
@@ -60,7 +66,7 @@ def _seed(value: Any) -> int:
     return value
 
 
-def _text_response(value: Mapping[str, Any], expected_model: str) -> str:
+def _text_response(value: Mapping[str, Any], expected_model: str) -> AnchorCompletion:
     if value.get("model") != expected_model:
         raise AnchorClientError("anchor response model does not match the frozen anchor")
     choices = value.get("choices")
@@ -69,13 +75,22 @@ def _text_response(value: Mapping[str, Any], expected_model: str) -> str:
     choice = choices[0]
     if not isinstance(choice, Mapping) or choice.get("index") != 0:
         raise AnchorClientError("anchor response choice must have index 0")
-    if choice.get("finish_reason") not in SUPPORTED_FINISH_REASONS:
+    finish_reason = choice.get("finish_reason")
+    if finish_reason not in SUPPORTED_FINISH_REASONS:
         raise AnchorClientError("anchor response has an unsupported finish reason")
     message = choice.get("message") if isinstance(choice, Mapping) else None
     content = message.get("content") if isinstance(message, Mapping) else None
     if not isinstance(content, str) or not content.strip():
         raise AnchorClientError("anchor response must contain one text response")
-    return content
+    return AnchorCompletion(content, finish_reason)
+
+
+def completion_text(value: str | AnchorCompletion) -> tuple[str, str]:
+    if isinstance(value, AnchorCompletion):
+        return value.text, value.finish_reason
+    if isinstance(value, str):
+        return value, "unknown"
+    raise AnchorClientError("anchor client returned an invalid completion")
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +144,7 @@ class OpenAIChatCompletionsClient:
         top_k: int,
         max_tokens: int,
         seed: int,
-    ) -> str:
+    ) -> AnchorCompletion:
         if not isinstance(model, str) or not model.strip():
             raise AnchorClientError("anchor model must be nonempty text")
         if not isinstance(message, str) or not message:
@@ -151,8 +166,10 @@ class OpenAIChatCompletionsClient:
 
 __all__ = [
     "AnchorChatClient",
+    "AnchorCompletion",
     "AnchorClientError",
     "JsonTransport",
     "OpenAIChatCompletionsClient",
     "TransportResponse",
+    "completion_text",
 ]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from threading import Barrier, Lock
 from typing import Any
 
 
@@ -35,6 +36,29 @@ class FakeAnchorClient:
 class InvalidAnchorClient:
     def complete(self, **request: Any) -> str:
         return "no boxed answer"
+
+
+class ConcurrentAnchorClient:
+    def __init__(self, *, failing_group: str | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.failing_group = failing_group
+        self.barrier = Barrier(2)
+        self.lock = Lock()
+
+    def complete(self, **request: Any) -> str:
+        message = request["message"]
+        if "A_ROLLOUT_" in message:
+            group, answer = "A", "42"
+        elif "B_ROLLOUT_" in message:
+            group, answer = "B", "7"
+        else:
+            raise AssertionError("unexpected fake prompt")
+        with self.lock:
+            self.calls.append({**request, "group": group})
+        self.barrier.wait(timeout=5)
+        if group == self.failing_group:
+            raise RuntimeError(f"synthetic {group} failure")
+        return rf"{group} synthesis: \boxed{{{answer}}}"
 
 
 def _kwargs(client: Any) -> dict[str, Any]:
@@ -155,12 +179,62 @@ class VerlBatchRewardTests(unittest.TestCase):
         }
         for row in result:
             self.assertEqual(row["anchor_extraction_status"], "ok")
+            self.assertEqual(row["anchor_failure_policy"], "fail_closed")
+            self.assertEqual(row["anchor_finish_reason"], "unknown")
             self.assertEqual(row["rollout_extraction_status"], "ok")
             self.assertIn(row["anchor_response_sha256"], anchor_hashes)
             self.assertRegex(row["anchor_answer_sha256"], r"^[0-9a-f]{64}$")
             self.assertGreaterEqual(row["anchor_latency_seconds"], 0.0)
             self.assertNotIn("anchor_answer", row)
             self.assertNotIn(r"\boxed", str(row))
+
+    def test_concurrent_groups_keep_alignment_and_call_anchor_once_each(self) -> None:
+        data_sources, solutions, ground_truths, extra_infos = _two_interleaved_groups()
+        client = ConcurrentAnchorClient()
+        kwargs = _kwargs(client)
+        kwargs["anchor_max_concurrency"] = 32
+
+        result = compute_score(
+            data_sources,
+            solutions,
+            ground_truths,
+            extra_infos,
+            **kwargs,
+        )
+
+        expected = [
+            int(
+                ("A_ROLLOUT" in solution and r"\boxed{42}" in solution)
+                or ("B_ROLLOUT" in solution and r"\boxed{7}" in solution)
+            )
+            for solution in solutions
+        ]
+        self.assertEqual([row["score"] for row in result], expected)
+        self.assertEqual(len(client.calls), 2)
+        self.assertCountEqual([call["group"] for call in client.calls], ["A", "B"])
+
+    def test_concurrent_anchor_failure_returns_no_partial_scores(self) -> None:
+        data_sources, solutions, ground_truths, extra_infos = _two_interleaved_groups()
+        client = ConcurrentAnchorClient(failing_group="A")
+        kwargs = _kwargs(client)
+        kwargs["anchor_max_concurrency"] = 32
+        result = None
+
+        with self.assertRaisesRegex(
+            RewardContractError,
+            "anchor client failed for question 'question-a'",
+        ):
+            result = compute_score(
+                data_sources,
+                solutions,
+                ground_truths,
+                extra_infos,
+                **kwargs,
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(len(client.calls), 2)
+        self.assertCountEqual([call["group"] for call in client.calls], ["A", "B"])
 
     def test_invalid_group_sizes_and_shapes_fail_before_anchor_call(self) -> None:
         data_sources, solutions, ground_truths, extra_infos = _two_interleaved_groups()
