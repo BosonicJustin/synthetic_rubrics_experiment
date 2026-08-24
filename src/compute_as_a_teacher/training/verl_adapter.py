@@ -372,6 +372,8 @@ def build_verl_command(
         f"{_hydra_bool(runtime.actor_parameter_offload)}",
         "actor_rollout_ref.actor.fsdp_config.optimizer_offload="
         f"{_hydra_bool(runtime.actor_optimizer_offload)}",
+        "actor_rollout_ref.actor.fsdp_config.offload_policy="
+        f"{_hydra_bool(runtime.actor_fsdp_offload_policy)}",
         "actor_rollout_ref.ref.fsdp_config.param_offload="
         f"{_hydra_bool(runtime.reference_parameter_offload)}",
         f"actor_rollout_ref.actor.optim.lr={config.grpo.learning_rate}",

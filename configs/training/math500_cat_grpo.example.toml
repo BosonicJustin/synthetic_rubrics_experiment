@@ -167,6 +167,7 @@ enable_gradient_checkpointing = true
 enable_activation_offload = false
 actor_parameter_offload = false
 actor_optimizer_offload = false
+actor_fsdp_offload_policy = false
 reference_parameter_offload = false
 max_prompt_tokens = 2048
 max_tokens_per_gpu = 16384

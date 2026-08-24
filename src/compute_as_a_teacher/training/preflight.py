@@ -828,7 +828,7 @@ def probe_runtime(
                 f"GPU {gpu.get('index')} has insufficient free memory for launch"
             )
     digest = result.get("trainer_image_digest")
-    if config.runtime.hardware_profile == "single_h100_colocated_pilot_v1":
+    if config.runtime.hardware_profile.startswith("single_h100_colocated_pilot_"):
         if digest not in (None, ""):
             raise TrainingError(
                 "The direct-host pilot must not claim CAT_TRAINER_IMAGE_DIGEST"
@@ -1435,7 +1435,7 @@ def run_preflight(
         missing.append("anchor canary")
     runtime_limitation = (
         "direct_host_runtime_is_bound_by_package_inventory_not_an_immutable_image"
-        if config.runtime.hardware_profile == "single_h100_colocated_pilot_v1"
+        if config.runtime.hardware_profile.startswith("single_h100_colocated_pilot_")
         else "trainer_image_digest_is_operator_supplied"
     )
     receipt: dict[str, Any] = {

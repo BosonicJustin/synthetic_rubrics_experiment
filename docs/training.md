@@ -128,8 +128,8 @@ profile remains the eight-H100 reproduction target. When only one 80 GB H100 is
 available, start from
 [`math500_cat_grpo.single_h100.example.toml`](../configs/training/math500_cat_grpo.single_h100.example.toml).
 That pilot keeps the paper-facing group size, global batch, sampling, learning rate,
-KL coefficient, token limits, and 1,000-step schedule unchanged. Its one-GPU FSDP,
-checkpointing, CPU offload, and reduced vLLM batching are execution changes.
+KL coefficient, token limits, and 1,000-step schedule unchanged. Its one-GPU FSDP2,
+checkpointing, CPU offload policy, and reduced vLLM batching are execution changes.
 
 The pilot places the frozen anchor and trainer on the same physical GPU, which is a
 noncanonical topology and must be reported as such. Keep the anchor small and

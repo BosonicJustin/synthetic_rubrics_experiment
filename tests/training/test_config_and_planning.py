@@ -103,13 +103,15 @@ class TrainingConfigTests(unittest.TestCase):
             self.assertEqual(getattr(single, name), getattr(canonical, name), name)
         self.assertEqual(
             single.runtime.hardware_profile,
-            "single_h100_colocated_pilot_v1",
+            "single_h100_colocated_pilot_v2",
         )
         self.assertEqual(single.runtime.gpus_per_node, 1)
         self.assertEqual(single.runtime.tensor_parallel_size, 1)
-        self.assertTrue(single.runtime.actor_parameter_offload)
-        self.assertTrue(single.runtime.actor_optimizer_offload)
-        self.assertTrue(single.runtime.reference_parameter_offload)
+        self.assertEqual(single.runtime.strategy, "fsdp2")
+        self.assertFalse(single.runtime.actor_parameter_offload)
+        self.assertFalse(single.runtime.actor_optimizer_offload)
+        self.assertTrue(single.runtime.actor_fsdp_offload_policy)
+        self.assertFalse(single.runtime.reference_parameter_offload)
         self.assertTrue(single.runtime.enable_activation_offload)
         self.assertEqual(single.runtime.anchor_max_concurrency, 1)
         self.assertEqual(single.runtime.minimum_gpu_free_memory_fraction, 0.7)
@@ -119,7 +121,7 @@ class TrainingConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(TrainingError, "runtime.hardware_profile"):
             load_text(
                 source.replace(
-                    'hardware_profile = "single_h100_colocated_pilot_v1"',
+                    'hardware_profile = "single_h100_colocated_pilot_v2"',
                     'hardware_profile = "single_h100"',
                 )
             )
@@ -136,6 +138,7 @@ class TrainingConfigTests(unittest.TestCase):
             "enable_activation_offload",
             "actor_parameter_offload",
             "actor_optimizer_offload",
+            "actor_fsdp_offload_policy",
             "reference_parameter_offload",
         }
         legacy = "\n".join(
@@ -335,9 +338,10 @@ class TrainingPlanningTests(unittest.TestCase):
                 "actor_rollout_ref.rollout.n=8",
                 "actor_rollout_ref.model.enable_gradient_checkpointing=True",
                 "actor_rollout_ref.model.enable_activation_offload=True",
-                "actor_rollout_ref.actor.fsdp_config.param_offload=True",
-                "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
-                "actor_rollout_ref.ref.fsdp_config.param_offload=True",
+                "actor_rollout_ref.actor.fsdp_config.param_offload=False",
+                "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
+                "actor_rollout_ref.actor.fsdp_config.offload_policy=True",
+                "actor_rollout_ref.ref.fsdp_config.param_offload=False",
                 "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
                 "actor_rollout_ref.rollout.gpu_memory_utilization=0.25",
                 "actor_rollout_ref.rollout.max_num_batched_tokens=4096",

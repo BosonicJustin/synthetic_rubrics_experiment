@@ -235,6 +235,7 @@ class RuntimeSpec:
     enable_activation_offload: bool
     actor_parameter_offload: bool
     actor_optimizer_offload: bool
+    actor_fsdp_offload_policy: bool
     reference_parameter_offload: bool
     max_prompt_tokens: int
     max_tokens_per_gpu: int
@@ -261,7 +262,7 @@ class RuntimeSpec:
                 reasons.append(f"runtime.{field_name} is unresolved")
             elif not re.fullmatch(r"[0-9a-f]{64}", value):
                 reasons.append(f"runtime.{field_name} must be a lowercase SHA-256")
-        if self.hardware_profile == "single_h100_colocated_pilot_v1":
+        if self.hardware_profile.startswith("single_h100_colocated_pilot_"):
             if self.trainer_image_digest != _DIRECT_HOST_IMAGE_SENTINEL:
                 reasons.append(
                     "runtime.trainer_image_digest must be "
@@ -576,7 +577,7 @@ def _parse_runtime(value: Any) -> RuntimeSpec:
         "rollout_max_num_batched_tokens", "rollout_max_num_seqs",
         "enable_gradient_checkpointing", "enable_activation_offload",
         "actor_parameter_offload", "actor_optimizer_offload",
-        "reference_parameter_offload",
+        "actor_fsdp_offload_policy", "reference_parameter_offload",
         "max_prompt_tokens", "max_tokens_per_gpu", "dataloader_workers", "seed",
         "download_allowed",
     }
@@ -588,6 +589,7 @@ def _parse_runtime(value: Any) -> RuntimeSpec:
         "enable_activation_offload",
         "actor_parameter_offload",
         "actor_optimizer_offload",
+        "actor_fsdp_offload_policy",
         "reference_parameter_offload",
     }
     if set(table) not in (expected, expected - memory_keys):
@@ -600,6 +602,7 @@ def _parse_runtime(value: Any) -> RuntimeSpec:
         "enable_activation_offload": False,
         "actor_parameter_offload": False,
         "actor_optimizer_offload": False,
+        "actor_fsdp_offload_policy": False,
         "reference_parameter_offload": False,
         **table,
     }
@@ -676,6 +679,10 @@ def _parse_runtime(value: Any) -> RuntimeSpec:
         actor_optimizer_offload=_bool(
             table["actor_optimizer_offload"],
             "runtime.actor_optimizer_offload",
+        ),
+        actor_fsdp_offload_policy=_bool(
+            table["actor_fsdp_offload_policy"],
+            "runtime.actor_fsdp_offload_policy",
         ),
         reference_parameter_offload=_bool(
             table["reference_parameter_offload"],
@@ -781,7 +788,6 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
         "framework_release": SUPPORTED_VERL_RELEASE,
         "framework_revision": SUPPORTED_VERL_REVISION,
         "adapter_version": SUPPORTED_ADAPTER_VERSION,
-        "strategy": "fsdp",
         "dtype": "bfloat16",
         "rollout_engine": "vllm",
         "seed": 42,
@@ -793,6 +799,7 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
     hardware_profiles: dict[str, dict[str, Any]] = {
         "paper_8xh100_v1": {
             "anchor_max_concurrency": 32,
+            "strategy": "fsdp",
             "nodes": 1,
             "gpus_per_node": 8,
             "minimum_gpu_free_memory_fraction": 0.9,
@@ -804,12 +811,14 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
             "enable_activation_offload": False,
             "actor_parameter_offload": False,
             "actor_optimizer_offload": False,
+            "actor_fsdp_offload_policy": False,
             "reference_parameter_offload": False,
             "max_tokens_per_gpu": 16384,
             "dataloader_workers": 8,
         },
         "single_h100_offload_v1": {
             "anchor_max_concurrency": 32,
+            "strategy": "fsdp",
             "nodes": 1,
             "gpus_per_node": 1,
             "minimum_gpu_free_memory_fraction": 0.9,
@@ -821,12 +830,14 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
             "enable_activation_offload": True,
             "actor_parameter_offload": True,
             "actor_optimizer_offload": True,
+            "actor_fsdp_offload_policy": False,
             "reference_parameter_offload": True,
             "max_tokens_per_gpu": 4096,
             "dataloader_workers": 2,
         },
         "single_h100_colocated_pilot_v1": {
             "anchor_max_concurrency": 1,
+            "strategy": "fsdp",
             "nodes": 1,
             "gpus_per_node": 1,
             "minimum_gpu_free_memory_fraction": 0.7,
@@ -838,7 +849,46 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
             "enable_activation_offload": True,
             "actor_parameter_offload": True,
             "actor_optimizer_offload": True,
+            "actor_fsdp_offload_policy": False,
             "reference_parameter_offload": True,
+            "max_tokens_per_gpu": 4096,
+            "dataloader_workers": 2,
+        },
+        "single_h100_offload_v2": {
+            "anchor_max_concurrency": 32,
+            "strategy": "fsdp2",
+            "nodes": 1,
+            "gpus_per_node": 1,
+            "minimum_gpu_free_memory_fraction": 0.9,
+            "tensor_parallel_size": 1,
+            "gpu_memory_utilization": 0.3,
+            "rollout_max_num_batched_tokens": 4096,
+            "rollout_max_num_seqs": 64,
+            "enable_gradient_checkpointing": True,
+            "enable_activation_offload": True,
+            "actor_parameter_offload": False,
+            "actor_optimizer_offload": False,
+            "actor_fsdp_offload_policy": True,
+            "reference_parameter_offload": False,
+            "max_tokens_per_gpu": 4096,
+            "dataloader_workers": 2,
+        },
+        "single_h100_colocated_pilot_v2": {
+            "anchor_max_concurrency": 1,
+            "strategy": "fsdp2",
+            "nodes": 1,
+            "gpus_per_node": 1,
+            "minimum_gpu_free_memory_fraction": 0.7,
+            "tensor_parallel_size": 1,
+            "gpu_memory_utilization": 0.25,
+            "rollout_max_num_batched_tokens": 4096,
+            "rollout_max_num_seqs": 16,
+            "enable_gradient_checkpointing": True,
+            "enable_activation_offload": True,
+            "actor_parameter_offload": False,
+            "actor_optimizer_offload": False,
+            "actor_fsdp_offload_policy": True,
+            "reference_parameter_offload": False,
             "max_tokens_per_gpu": 4096,
             "dataloader_workers": 2,
         },
