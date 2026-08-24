@@ -296,7 +296,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     score_raw = subparsers.add_parser(
         "score-raw",
-        help="Load locked labels only now and score a complete raw run.",
+        help=(
+            "Optional all-rollout diagnostic over existing raw generations; "
+            "never runs inference."
+        ),
     )
     score_raw.add_argument("--run-dir", type=Path, required=True)
     score_raw.add_argument("--config", type=Path, required=True)
@@ -304,7 +307,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     score_synthesis = subparsers.add_parser(
         "score-synthesis",
-        help="Score synthesis and its exact paired raw dependency.",
+        help=(
+            "Score synthesis against one deterministically selected existing raw "
+            "attempt; no prior raw scoring is required."
+        ),
     )
     score_synthesis.add_argument("--run-dir", type=Path, required=True)
     score_synthesis.add_argument("--raw-run-dir", type=Path, required=True)

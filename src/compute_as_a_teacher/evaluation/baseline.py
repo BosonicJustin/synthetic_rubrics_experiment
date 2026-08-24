@@ -28,6 +28,7 @@ from .schemas import GenerationResult
 
 _LABEL_DERIVED_ARTIFACTS = (
     "scores.jsonl",
+    "paired_scores.jsonl",
     "summary.json",
     "scoring_manifest.json",
     "final-experiment.json",
@@ -86,6 +87,8 @@ def _audit_canary(
         raise EvaluationError("Canary execution provenance is incomplete or mismatched")
 
     finish_reasons: dict[str, int] = {}
+    extraction_statuses: dict[str, int] = {}
+    boxed_outputs = 0
     for request in requests[:results]:
         result = GenerationResult.from_dict(
             read_json(run_dir / RESULTS_DIRECTORY / f"{request.task_id}.json")
@@ -107,11 +110,10 @@ def _audit_canary(
                 f"Canary finish reason is unsupported: {request.task_id}"
             )
         extraction = extract_last_boxed(result.text)
-        if extraction.status != "ok":
-            raise EvaluationError(
-                "Canary output has no valid final boxed answer: "
-                f"{request.task_id} ({extraction.status})"
-            )
+        extraction_statuses[extraction.status] = (
+            extraction_statuses.get(extraction.status, 0) + 1
+        )
+        boxed_outputs += int(extraction.status == "ok")
         finish_reasons[result.finish_reason] = (
             finish_reasons.get(result.finish_reason, 0) + 1
         )
@@ -120,7 +122,8 @@ def _audit_canary(
         "audited_results": results,
         "response_model": requests[0].model.model_id,
         "finish_reasons": dict(sorted(finish_reasons.items())),
-        "boxed_outputs": results,
+        "extraction_status_counts": dict(sorted(extraction_statuses.items())),
+        "boxed_outputs": boxed_outputs,
     }
 
 

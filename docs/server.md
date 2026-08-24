@@ -281,7 +281,9 @@ docker compose -f infra/server/compose.yaml run --rm evaluator \
 All training and generation is now complete. Start the offline, CPU-only scorer to
 cross the labels boundary. Baseline scoring itself revalidates the terminal guarded
 handoff, so it cannot publish label-derived artifacts while training is still
-possible. Score baseline first, then the trained evaluation:
+possible. Each scoring phase runs one `score-synthesis` command: it makes no model
+calls and compares each synthesized answer with one existing raw attempt selected by
+the fixed scoring seed. Score baseline first, then the trained evaluation:
 
 ```bash
 docker compose -f infra/server/compose.yaml run --rm scorer \
@@ -295,7 +297,8 @@ docker compose -f infra/server/compose.yaml run --rm scorer \
 ```
 
 Finally use the same scorer to publish and independently verify the registry only
-after all four scored plans and their lineage validate:
+after both paired synthesis score artifacts and their raw-generation lineage
+validate:
 
 ```bash
 docker compose -f infra/server/compose.yaml run --rm scorer \

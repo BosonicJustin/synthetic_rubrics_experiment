@@ -26,6 +26,7 @@ from compute_as_a_teacher.evaluation.execution import verify_complete_execution
 from compute_as_a_teacher.evaluation.errors import EvaluationError
 from compute_as_a_teacher.evaluation.planning import load_plan
 from compute_as_a_teacher.evaluation.scoring import (
+    PAIRED_SCORES_NAME,
     SCORES_NAME,
     SCORING_MANIFEST_NAME,
     SUMMARY_NAME,
@@ -514,6 +515,8 @@ def _final_registry_inputs(workflow: ServerWorkflow) -> tuple[str, ...]:
     return (
         "--preregistration",
         str(workflow.preregistration),
+        "--scoring-config",
+        str(workflow.scoring_config),
         "--initial-raw-run-dir",
         str(workflow.initial_raw_run),
         "--initial-synthesis-run-dir",
@@ -639,6 +642,8 @@ def phase_commands(
                     "preregister-experiment",
                     "--output",
                     str(workflow.preregistration),
+                    "--scoring-config",
+                    str(workflow.scoring_config),
                     "--initial-raw-run-dir",
                     str(workflow.initial_raw_run),
                     "--initial-synthesis-config",
@@ -708,17 +713,6 @@ def phase_commands(
         )
     if phase == "baseline-scoring":
         return (
-            PhaseCommand(
-                "score_initial_raw",
-                _eval(
-                    workflow,
-                    "score-raw",
-                    "--run-dir",
-                    str(workflow.initial_raw_run),
-                    "--config",
-                    str(workflow.scoring_config),
-                ),
-            ),
             PhaseCommand(
                 "score_initial_synthesis",
                 _eval(
@@ -998,17 +992,6 @@ def phase_commands(
     if phase == "trained-eval-scoring":
         return (
             PhaseCommand(
-                "score_trained_raw",
-                _eval(
-                    workflow,
-                    "score-raw",
-                    "--run-dir",
-                    str(workflow.trained_raw_run),
-                    "--config",
-                    str(workflow.scoring_config),
-                ),
-            ),
-            PhaseCommand(
                 "score_trained_synthesis",
                 _eval(
                     workflow,
@@ -1253,15 +1236,25 @@ def _verify_scored_experiment(workflow: ServerWorkflow) -> None:
         (workflow.trained_raw_run, workflow.trained_synthesis_run),
     ):
         score_run(
-            raw_run,
-            scoring,
-            repository_root=workflow.repository_root,
-        )
-        score_run(
             synthesis_run,
             scoring,
             repository_root=workflow.repository_root,
             raw_run_dir=raw_run,
+        )
+
+
+def _verify_scoring_config_binding(
+    workflow: ServerWorkflow,
+    preregistration: Mapping[str, Any],
+) -> None:
+    stages = preregistration.get("stages")
+    scoring = stages.get("scoring_config") if isinstance(stages, Mapping) else None
+    if (
+        not isinstance(scoring, Mapping)
+        or scoring.get("path") != str(workflow.scoring_config.resolve())
+    ):
+        raise ServerWorkflowError(
+            "Server scoring config does not match the experiment preregistration"
         )
 
 
@@ -1290,7 +1283,12 @@ def _require_label_derived_artifacts_absent(workflow: ServerWorkflow) -> None:
             workflow.trained_raw_run,
             workflow.trained_synthesis_run,
         )
-        for name in (SCORES_NAME, SUMMARY_NAME, SCORING_MANIFEST_NAME)
+        for name in (
+            SCORES_NAME,
+            PAIRED_SCORES_NAME,
+            SUMMARY_NAME,
+            SCORING_MANIFEST_NAME,
+        )
         if os.path.lexists(run_dir / name)
     ]
     if found:
@@ -1353,9 +1351,11 @@ def _phase_precondition(
         "trained-eval-scoring",
         "finalize",
     }:
-        verify_preregistered_training_stage(
+        preregistration = verify_preregistered_training_stage(
             workflow.preregistration, workflow.training_run
         )
+        if phase in {"baseline-scoring", "trained-eval-scoring", "finalize"}:
+            _verify_scoring_config_binding(workflow, preregistration)
     if phase == "baseline-generation" and not os.environ.get(
         workflow.evaluation_api_key_env
     ):

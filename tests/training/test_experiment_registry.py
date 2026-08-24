@@ -18,6 +18,7 @@ from compute_as_a_teacher.evaluation.artifacts import canonical_json_bytes, sha2
 from compute_as_a_teacher.evaluation.config import (
     MATH500_PROTOCOL_VERSION,
     PromptSpec,
+    ScoringConfig,
     SynthesisEvalConfig,
 )
 from compute_as_a_teacher.evaluation.schemas import ModelSpec, SamplingSpec
@@ -92,6 +93,8 @@ class ExperimentRegistryTests(unittest.TestCase):
             )
         self.synthesis_config_path = self.root / "initial_synthesis.toml"
         self.synthesis_config_path.write_text("# fixture\n", encoding="utf-8")
+        self.scoring_config_path = self.root / "math500_scoring.toml"
+        self.scoring_config_path.write_text("# scoring fixture\n", encoding="utf-8")
         self.preregistration_path = self.root / "preregistration.json"
         self.registry_path = self.root / "registry.json"
 
@@ -131,6 +134,19 @@ class ExperimentRegistryTests(unittest.TestCase):
             prompt=self.synthesis_prompt,
             anchor=self.initial_eval_model,
             sampling=self.synthesis_sampling,
+        )
+        self.scoring_config = ScoringConfig(
+            schema_version=2,
+            kind="scoring",
+            protocol_version=MATH500_PROTOCOL_VERSION,
+            labels_path="data/math500/labels.jsonl",
+            dataset_lock_path="data/math500.lock.json",
+            raw_baseline_selection="sha256_uniform_per_question_v1",
+            raw_baseline_seed=1729,
+            primary_grader="last_boxed_string_exact_v1",
+            diagnostic_graders=("math_verify_v0.9.0",),
+            parsing_timeout_seconds=5,
+            max_answer_chars=50_000,
         )
 
         self.questions = {
@@ -351,6 +367,12 @@ class ExperimentRegistryTests(unittest.TestCase):
             )
             stack.enter_context(
                 patch(
+                    f"{MODULE}.load_scoring_config",
+                    return_value=self.scoring_config,
+                )
+            )
+            stack.enter_context(
+                patch(
                     f"{MODULE}.load_registered_checkpoint",
                     return_value=(
                         copy.deepcopy(self.checkpoint),
@@ -365,6 +387,7 @@ class ExperimentRegistryTests(unittest.TestCase):
             self.preregistration_path,
             self.run_dirs["initial_raw"],
             self.synthesis_config_path,
+            self.scoring_config_path,
             self.run_dirs["training"],
         )
 
@@ -378,6 +401,7 @@ class ExperimentRegistryTests(unittest.TestCase):
         return write_final_experiment_registry(
             self.registry_path,
             self.preregistration_path,
+            self.scoring_config_path,
             self.run_dirs["initial_raw"],
             self.run_dirs["initial_synthesis"],
             self.run_dirs["training"],
@@ -395,6 +419,7 @@ class ExperimentRegistryTests(unittest.TestCase):
             verified = verify_final_experiment_registry(
                 self.registry_path,
                 self.preregistration_path,
+                self.scoring_config_path,
                 self.run_dirs["initial_raw"],
                 self.run_dirs["initial_synthesis"],
                 self.run_dirs["training"],
@@ -440,6 +465,15 @@ class ExperimentRegistryTests(unittest.TestCase):
         ):
             self._preregister()
 
+    def test_preregistration_must_precede_paired_scores(self) -> None:
+        (self.run_dirs["initial_raw"] / "paired_scores.jsonl").write_text(
+            "{}\n", encoding="utf-8"
+        )
+        with self._patched_loaders(), self.assertRaisesRegex(
+            TrainingError, "before result artifacts exist"
+        ):
+            self._preregister()
+
     def test_preregistration_must_precede_training_logs(self) -> None:
         (self.run_dirs["training"] / "logs").mkdir()
         with self._patched_loaders(), self.assertRaisesRegex(
@@ -456,12 +490,53 @@ class ExperimentRegistryTests(unittest.TestCase):
             )
         self.assertEqual(verified, preregistration)
 
+    def test_preregistration_binds_scoring_artifact_and_semantics(self) -> None:
+        expected_fingerprint = sha256_bytes(
+            canonical_json_bytes(self.scoring_config.to_dict())
+        )
+        with self._patched_loaders():
+            preregistration = self._preregister()
+
+        scoring_stage = preregistration["stages"]["scoring_config"]
+        scoring_contract = preregistration["contract"]["scoring"]
+        self.assertEqual(
+            scoring_stage["path"], str(self.scoring_config_path.resolve())
+        )
+        self.assertEqual(
+            scoring_stage["artifact"]["sha256"],
+            sha256_bytes(self.scoring_config_path.read_bytes()),
+        )
+        self.assertEqual(
+            scoring_stage["semantic_fingerprint"], expected_fingerprint
+        )
+        self.assertEqual(
+            preregistration["contract"]["scoring_config_fingerprint"],
+            expected_fingerprint,
+        )
+        self.assertEqual(
+            scoring_contract["raw_baseline_selection"],
+            "sha256_uniform_per_question_v1",
+        )
+        self.assertEqual(scoring_contract["raw_baseline_seed"], 1729)
+
     def test_launch_verification_detects_baseline_source_drift(self) -> None:
         with self._patched_loaders():
             self._preregister()
         self.synthesis_config_path.write_text("# changed\n", encoding="utf-8")
         with self._patched_loaders(), self.assertRaisesRegex(
             TrainingError, "changed after registration"
+        ):
+            verify_preregistered_training_stage(
+                self.preregistration_path,
+                self.run_dirs["training"],
+            )
+
+    def test_launch_verification_detects_scoring_config_byte_drift(self) -> None:
+        with self._patched_loaders():
+            self._preregister()
+        self.scoring_config_path.write_text("# changed\n", encoding="utf-8")
+        with self._patched_loaders(), self.assertRaisesRegex(
+            TrainingError, "preregistered scoring config changed after registration"
         ):
             verify_preregistered_training_stage(
                 self.preregistration_path,
@@ -476,6 +551,7 @@ class ExperimentRegistryTests(unittest.TestCase):
                 self.run_dirs["initial_raw"] / "requests.jsonl",
                 self.run_dirs["initial_raw"],
                 self.synthesis_config_path,
+                self.scoring_config_path,
                 self.run_dirs["training"],
                 force=True,
             )
@@ -540,6 +616,37 @@ class ExperimentRegistryTests(unittest.TestCase):
         ):
             self._finalize()
 
+    def test_finalization_rejects_scoring_semantic_drift(self) -> None:
+        with self._patched_loaders():
+            self._preregister()
+        self.scoring_config = replace(self.scoring_config, raw_baseline_seed=999)
+        with self._patched_loaders(), self.assertRaisesRegex(
+            TrainingError, "Preregistered inputs or contract changed"
+        ):
+            self._finalize()
+
+    def test_verification_rejects_scoring_semantic_drift(self) -> None:
+        with self._patched_loaders():
+            self._preregister()
+            self._finalize()
+        self.scoring_config = replace(
+            self.scoring_config,
+            raw_baseline_selection="different_selector_v1",
+        )
+        with self._patched_loaders(), self.assertRaisesRegex(
+            TrainingError, "Preregistered inputs or contract changed"
+        ):
+            verify_final_experiment_registry(
+                self.registry_path,
+                self.preregistration_path,
+                self.scoring_config_path,
+                self.run_dirs["initial_raw"],
+                self.run_dirs["initial_synthesis"],
+                self.run_dirs["training"],
+                self.run_dirs["trained_raw"],
+                self.run_dirs["trained_synthesis"],
+            )
+
     def test_finalization_rejects_label_based_checkpoint_selection(self) -> None:
         with self._patched_loaders():
             self._preregister()
@@ -572,6 +679,7 @@ class ExperimentRegistryTests(unittest.TestCase):
             verify_final_experiment_registry(
                 self.registry_path,
                 self.preregistration_path,
+                self.scoring_config_path,
                 self.run_dirs["initial_raw"],
                 self.run_dirs["initial_synthesis"],
                 self.run_dirs["training"],

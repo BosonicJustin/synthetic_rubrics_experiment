@@ -15,7 +15,9 @@ from compute_as_a_teacher.evaluation.artifacts import (
 )
 from compute_as_a_teacher.evaluation.config import (
     MATH500_PROTOCOL_VERSION,
+    ScoringConfig,
     SynthesisEvalConfig,
+    load_scoring_config,
     load_synthesis_config,
 )
 from compute_as_a_teacher.evaluation.errors import EvaluationError
@@ -31,7 +33,7 @@ from .verl_adapter import LaunchLease, exclusive_launch
 
 PREREGISTRATION_KIND = "cat_math500_experiment_preregistration"
 REGISTRY_KIND = "cat_math500_experiment_registry"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _EVAL_RESULT_NAMES = (
     "results",
@@ -39,6 +41,7 @@ _EVAL_RESULT_NAMES = (
     "execution.json",
     "responses.jsonl",
     "scores.jsonl",
+    "paired_scores.jsonl",
     "summary.json",
     "scoring_manifest.json",
 )
@@ -253,6 +256,7 @@ def _require_prompt_lineage(
 def _validate_preregistration_contract(
     raw_manifest: Mapping[str, Any],
     synthesis_config: SynthesisEvalConfig,
+    scoring_config: ScoringConfig,
     training_manifest: Mapping[str, Any],
 ) -> dict[str, Any]:
     _require(raw_manifest.get("kind") == "raw", "Initial evaluation must be raw")
@@ -292,6 +296,7 @@ def _validate_preregistration_contract(
     )
 
     synthesis_value = synthesis_config.to_dict()
+    scoring_value = scoring_config.to_dict()
     _require(
         synthesis_config.protocol_version == MATH500_PROTOCOL_VERSION,
         "Initial synthesis config uses the wrong evaluation protocol",
@@ -308,12 +313,20 @@ def _validate_preregistration_contract(
         synthesis_config.required_rollouts == 8,
         "Initial synthesis must consume eight rollouts",
     )
+    _require(
+        scoring_config.protocol_version == MATH500_PROTOCOL_VERSION,
+        "Scoring config uses the wrong evaluation protocol",
+    )
 
     _require(
         raw_config.get("questions_path") == training_config.get("questions_path")
         and raw_config.get("dataset_lock_path")
         == training_config.get("dataset_lock_path"),
         "Evaluation and training dataset paths differ",
+    )
+    _require(
+        scoring_config.dataset_lock_path == raw_config.get("dataset_lock_path"),
+        "Scoring and generation dataset locks differ",
     )
     raw_inputs = _mapping(raw_manifest.get("inputs"), "initial raw inputs")
     training_inputs = _mapping(training_manifest.get("inputs"), "training inputs")
@@ -416,9 +429,17 @@ def _validate_preregistration_contract(
             "step": 1000,
             "selection": "fixed_final_step_without_labels",
         },
+        "scoring": {
+            "semantic_fingerprint": _semantic_fingerprint(scoring_value),
+            "raw_baseline_selection": scoring_config.raw_baseline_selection,
+            "raw_baseline_seed": scoring_config.raw_baseline_seed,
+            "primary_grader": scoring_config.primary_grader,
+            "diagnostic_graders": list(scoring_config.diagnostic_graders),
+        },
         "initial_synthesis_config_fingerprint": _semantic_fingerprint(
             synthesis_value
         ),
+        "scoring_config_fingerprint": _semantic_fingerprint(scoring_value),
         "labels_loaded": False,
     }
 
@@ -426,12 +447,14 @@ def _validate_preregistration_contract(
 def _assemble_preregistration(
     initial_raw_run_dir: Path,
     initial_synthesis_config_path: Path,
+    scoring_config_path: Path,
     training_run_dir: Path,
     *,
     enforce_preresult: bool,
 ) -> dict[str, Any]:
     initial_raw_run_dir = initial_raw_run_dir.resolve()
     initial_synthesis_config_path = initial_synthesis_config_path.resolve()
+    scoring_config_path = scoring_config_path.resolve()
     training_run_dir = training_run_dir.resolve()
     if enforce_preresult:
         _ensure_preresult(
@@ -442,9 +465,13 @@ def _assemble_preregistration(
         )
     raw_manifest, _ = load_plan(initial_raw_run_dir, expected_kind="raw")
     synthesis_config = load_synthesis_config(initial_synthesis_config_path)
+    scoring_config = load_scoring_config(scoring_config_path)
     training_manifest, _ = load_training_plan(training_run_dir)
     contract = _validate_preregistration_contract(
-        raw_manifest, synthesis_config, training_manifest
+        raw_manifest,
+        synthesis_config,
+        scoring_config,
+        training_manifest,
     )
     value: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -457,6 +484,13 @@ def _assemble_preregistration(
                 "artifact": _artifact(initial_synthesis_config_path),
                 "semantic_fingerprint": contract[
                     "initial_synthesis_config_fingerprint"
+                ],
+            },
+            "scoring_config": {
+                "path": str(scoring_config_path),
+                "artifact": _artifact(scoring_config_path),
+                "semantic_fingerprint": contract[
+                    "scoring_config_fingerprint"
                 ],
             },
             "canonical_training": _training_stage(
@@ -478,6 +512,7 @@ def _assemble_preregistration(
 def build_experiment_preregistration(
     initial_raw_run_dir: Path,
     initial_synthesis_config_path: Path,
+    scoring_config_path: Path,
     training_run_dir: Path,
 ) -> dict[str, Any]:
     """Build the frozen pre-result experiment contract without writing it."""
@@ -486,6 +521,7 @@ def build_experiment_preregistration(
         return _assemble_preregistration(
             initial_raw_run_dir,
             initial_synthesis_config_path,
+            scoring_config_path,
             training_run_dir,
             enforce_preresult=True,
         )
@@ -497,6 +533,7 @@ def write_experiment_preregistration(
     output_path: Path,
     initial_raw_run_dir: Path,
     initial_synthesis_config_path: Path,
+    scoring_config_path: Path,
     training_run_dir: Path,
     *,
     force: bool = False,
@@ -509,6 +546,7 @@ def write_experiment_preregistration(
                 output_path,
                 initial_raw_run_dir,
                 initial_synthesis_config_path,
+                scoring_config_path,
                 training_run_dir,
                 force=force,
                 _lease=lease,
@@ -519,6 +557,7 @@ def write_experiment_preregistration(
         (
             initial_raw_run_dir / "manifest.json",
             initial_synthesis_config_path,
+            scoring_config_path,
             training_run_dir / "manifest.json",
         ),
         bound_roots=(initial_raw_run_dir, training_run_dir),
@@ -526,6 +565,7 @@ def write_experiment_preregistration(
     value = build_experiment_preregistration(
         initial_raw_run_dir,
         initial_synthesis_config_path,
+        scoring_config_path,
         training_run_dir,
     )
     try:
@@ -593,6 +633,14 @@ def verify_preregistered_training_stage(
     _verify_artifact(
         initial_synthesis.get("artifact"),
         "preregistered initial synthesis config",
+    )
+    scoring = _mapping(
+        stages.get("scoring_config"),
+        "preregistered scoring config",
+    )
+    _verify_artifact(
+        scoring.get("artifact"),
+        "preregistered scoring config",
     )
     registered = _mapping(
         stages.get("canonical_training"), "preregistered canonical training"
@@ -854,6 +902,7 @@ def _validate_final_contract(
 
 def build_final_experiment_registry(
     preregistration_path: Path,
+    scoring_config_path: Path,
     initial_raw_run_dir: Path,
     initial_synthesis_run_dir: Path,
     training_run_dir: Path,
@@ -884,11 +933,21 @@ def build_final_experiment_registry(
             synthesis_registration.get("artifact"),
             "preregistered synthesis config",
         )
+        scoring_registration = _mapping(
+            registered_stages.get("scoring_config"),
+            "preregistered scoring config",
+        )
+        _verify_artifact(
+            scoring_registration.get("artifact"),
+            "preregistered scoring config",
+        )
+        scoring_config_path = scoring_config_path.resolve()
         current_preregistration = _assemble_preregistration(
             initial_raw_run_dir,
             Path(
                 preregistration["stages"]["initial_synthesis_config"]["path"]
             ),
+            scoring_config_path,
             training_run_dir,
             enforce_preresult=False,
         )
@@ -964,6 +1023,13 @@ def build_final_experiment_registry(
                 "initial_synthesis": _eval_stage(
                     initial_synthesis_run_dir, initial_synthesis_manifest
                 ),
+                "scoring_config": {
+                    "path": str(scoring_config_path),
+                    "artifact": _artifact(scoring_config_path),
+                    "semantic_fingerprint": preregistration["contract"][
+                        "scoring_config_fingerprint"
+                    ],
+                },
                 "canonical_training": _training_stage(
                     training_run_dir, training_manifest
                 ),
@@ -997,6 +1063,7 @@ def build_final_experiment_registry(
 def write_final_experiment_registry(
     output_path: Path,
     preregistration_path: Path,
+    scoring_config_path: Path,
     initial_raw_run_dir: Path,
     initial_synthesis_run_dir: Path,
     training_run_dir: Path,
@@ -1012,6 +1079,7 @@ def write_final_experiment_registry(
             return write_final_experiment_registry(
                 output_path,
                 preregistration_path,
+                scoring_config_path,
                 initial_raw_run_dir,
                 initial_synthesis_run_dir,
                 training_run_dir,
@@ -1025,6 +1093,7 @@ def write_final_experiment_registry(
         output_path,
         (
             preregistration_path,
+            scoring_config_path,
             initial_raw_run_dir / "manifest.json",
             initial_synthesis_run_dir / "manifest.json",
             training_run_dir / "manifest.json",
@@ -1043,6 +1112,7 @@ def write_final_experiment_registry(
     )
     value = build_final_experiment_registry(
         preregistration_path,
+        scoring_config_path,
         initial_raw_run_dir,
         initial_synthesis_run_dir,
         training_run_dir,
@@ -1086,6 +1156,7 @@ def load_final_experiment_registry(path: Path) -> dict[str, Any]:
 def verify_final_experiment_registry(
     registry_path: Path,
     preregistration_path: Path,
+    scoring_config_path: Path,
     initial_raw_run_dir: Path,
     initial_synthesis_run_dir: Path,
     training_run_dir: Path,
@@ -1095,6 +1166,7 @@ def verify_final_experiment_registry(
     registered = load_final_experiment_registry(registry_path)
     current = build_final_experiment_registry(
         preregistration_path,
+        scoring_config_path,
         initial_raw_run_dir,
         initial_synthesis_run_dir,
         training_run_dir,

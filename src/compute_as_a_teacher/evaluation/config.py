@@ -14,6 +14,7 @@ from .schemas import ModelSpec, SamplingSpec
 
 
 MATH500_PROTOCOL_VERSION = "cat_math500_paper_v1"
+RAW_BASELINE_SELECTION_METHOD = "sha256_uniform_per_question_v1"
 SYNTHESIS_ANCHOR_RELATIONS = frozenset(
     {"same_as_raw", "frozen_initial_for_trained_raw"}
 )
@@ -129,6 +130,8 @@ class ScoringConfig:
     protocol_version: str
     labels_path: str
     dataset_lock_path: str
+    raw_baseline_selection: str
+    raw_baseline_seed: int
     primary_grader: str
     diagnostic_graders: tuple[str, ...]
     parsing_timeout_seconds: int
@@ -141,6 +144,8 @@ class ScoringConfig:
             "protocol_version": self.protocol_version,
             "labels_path": self.labels_path,
             "dataset_lock_path": self.dataset_lock_path,
+            "raw_baseline_selection": self.raw_baseline_selection,
+            "raw_baseline_seed": self.raw_baseline_seed,
             "primary_grader": self.primary_grader,
             "diagnostic_graders": list(self.diagnostic_graders),
             "parsing_timeout_seconds": self.parsing_timeout_seconds,
@@ -248,14 +253,29 @@ def load_scoring_config(path: Path) -> ScoringConfig:
         "protocol_version",
         "labels_path",
         "dataset_lock_path",
+        "raw_baseline_selection",
+        "raw_baseline_seed",
         "primary_grader",
         "diagnostic_graders",
         "parsing_timeout_seconds",
         "max_answer_chars",
     }
     _exact_keys(value, expected, "scoring config")
-    if value["schema_version"] != 1 or value["kind"] != "scoring":
-        raise EvaluationError("Scoring config must use schema_version=1 and kind='scoring'")
+    if value["schema_version"] != 2 or value["kind"] != "scoring":
+        raise EvaluationError("Scoring config must use schema_version=2 and kind='scoring'")
+    selection = value["raw_baseline_selection"]
+    if selection != RAW_BASELINE_SELECTION_METHOD:
+        raise EvaluationError(
+            "raw_baseline_selection must be "
+            f"{RAW_BASELINE_SELECTION_METHOD!r}"
+        )
+    baseline_seed = value["raw_baseline_seed"]
+    if (
+        isinstance(baseline_seed, bool)
+        or not isinstance(baseline_seed, int)
+        or not 0 <= baseline_seed < 2**63
+    ):
+        raise EvaluationError("raw_baseline_seed must be in [0, 2^63)")
     diagnostics = value["diagnostic_graders"]
     if not isinstance(diagnostics, list) or not all(
         isinstance(item, str) and item for item in diagnostics
@@ -281,11 +301,13 @@ def load_scoring_config(path: Path) -> ScoringConfig:
             f"protocol_version must be {MATH500_PROTOCOL_VERSION!r}"
         )
     return ScoringConfig(
-        schema_version=1,
+        schema_version=2,
         kind="scoring",
         protocol_version=protocol_version,
         labels_path=_text(value["labels_path"], "labels_path"),
         dataset_lock_path=_text(value["dataset_lock_path"], "dataset_lock_path"),
+        raw_baseline_selection=selection,
+        raw_baseline_seed=baseline_seed,
         primary_grader=primary,
         diagnostic_graders=tuple(diagnostics),
         parsing_timeout_seconds=timeout,

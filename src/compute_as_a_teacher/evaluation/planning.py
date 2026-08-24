@@ -411,6 +411,7 @@ def _descendant_artifacts(run_dir: Path) -> list[Path]:
         EXECUTION_NAME,
         "responses.jsonl",
         "scores.jsonl",
+        "paired_scores.jsonl",
         "summary.json",
         "scoring_manifest.json",
     )

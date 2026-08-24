@@ -4,11 +4,12 @@ This milestone implements the complete model-independent evaluation path for the
 paper’s MATH-500 experiment:
 
 1. construct eight raw policy-rollout requests per problem;
-2. treat rollout index 0 as the predeclared single-sample raw baseline while also
-   reporting mean-of-eight, any-correct-at-eight, and literal plurality diagnostics;
+2. select one existing raw rollout per problem with a fixed, uniformly distributed
+   deterministic selector;
 3. construct one synthesis request per problem from the eight ordered rollout texts;
-4. grade raw and synthesis outputs at a separate labels-only boundary; and
-5. report paired synthesis deltas against raw rollout 0 and the raw eight-sample mean.
+4. grade only the selected raw answer and its synthesized answer at a separate
+   labels-only boundary; and
+5. report paired synthesis deltas against that selected raw baseline.
 
 The repository includes a standard-library OpenAI-compatible adapter for an already
 served model. It does not import Transformers or vLLM, load a checkpoint, or download
@@ -16,9 +17,11 @@ weights. Fake, external, and HTTP-endpoint results are unconditionally marked
 non-reportable by the current adapters; runtime and checkpoint attestation would
 require a separately versioned execution backend.
 
-The paper's raw “single” result is one rollout; this repository predeclares rollout
-0 because the paper does not name an index. Its Table 1 disagreement results average
-seven seeds, so this single-seed profile is not a Table 1 reproduction.
+The paper's raw “single” result is one rollout but does not name an index. This
+repository selects one of the eight already-generated attempts independently for
+each problem using the fixed scoring seed. It never makes another raw model call for
+scoring. The paper's Table 1 disagreement results average seven seeds, so this
+single-seed profile is not a Table 1 reproduction.
 
 ## Paper contract and explicit local choices
 
@@ -51,17 +54,24 @@ choices rather than presenting them as paper text:
   protocol and is not used by this reproduction;
 - synthesis rollouts are serialized as `## RESPONSE 1` through `## RESPONSE 8`;
 - SHA-derived per-question seeds use a checked-in base seed;
+- the raw comparison baseline uses
+  `sha256_uniform_per_question_v1` with scoring seed `1729`: a domain-separated
+  SHA-256 digest of the UTF-8 canonical JSON line
+  `["compute_as_a_teacher/raw_baseline/sha256_uniform_per_question_v1",
+  protocol_version, 1729, question_id]`, including its terminal newline, interpreted
+  as a big-endian integer and reduced modulo eight;
 - sampling also fixes `do_sample=true`, single-beam generation, repetition penalty
   `1.0`, and no stop strings; these values are local choices, not paper facts;
 - endpoint outputs accept only `stop` and `length` finish reasons, and boxed-answer
-  extraction has a 50,000-character safety cap; these are local failure policies;
+  extraction has a 50,000-character safety cap; unsupported finish reasons are
+  infrastructure failures, while extraction failures are scored incorrect;
 - Appendix I says regex extraction plus string matching but does not publish the
   regex. `last_boxed_string_exact_v1` is therefore a disclosed balanced-brace,
   last-`\\boxed` approximation, not a claim of byte-exact parser reproduction;
 - the literal Appendix F ending says `$ boxed{answer}$` while this implementation
-  requires `\\boxed{...}` for extraction. The canonical run fails closed on an
-  unextractable synthesis; the one-backslash prompt repair is reserved for a
-  separately preregistered sensitivity run;
+  requires `\\boxed{...}` for extraction. A naturally unextractable evaluation
+  output is preserved and graded incorrect; the one-backslash prompt repair is
+  reserved for a separately preregistered sensitivity run;
 - `Qwen/Qwen3-4B` is this repository's Hugging Face Hub mapping for the paper's
   `Qwen3-4B` model label; the paper does not publish a registry ID or revision;
 - `last_boxed_string_exact_v1` strips only outer whitespace and is the primary
@@ -147,7 +157,8 @@ The suite uses two synthetic questions, 16 keyed raw outputs, and two synthesis
 outputs. It tests crash-safe append-only resume, reversed batch-return order, prompt
 leakage sentinels, request/result tampering, cross-lock and stale-score rejection,
 wrong raw lineage, unsupported sampling fields, external-ingest reportability,
-paired metrics, nested boxed expressions, and symbolic answer equivalence. It never
+deterministic raw selection, paired metrics, nested boxed expressions, and symbolic
+answer equivalence. It never
 calls a real model or scores MATH-500 model predictions.
 
 ## Creating a runnable plan later
@@ -250,23 +261,35 @@ python3 scripts/evaluate_math500.py run-openai \
   --batch-size 16
 ```
 
-Only after both raw and synthesis generation are complete should labels be loaded:
+Only after both raw and synthesis generation are complete should labels be loaded.
+The synthesis scoring command reads the existing raw generations, selects one raw
+attempt per problem according to the locked scoring config, and grades the 500 raw
+and synthesis pairs. It does not run inference and does not require a prior
+`score-raw` command:
 
 ```bash
-python3 scripts/evaluate_math500.py score-raw \
-  --run-dir outputs/evals/math500-initial-raw \
-  --config configs/evals/math500_scoring.toml
-
 python3 scripts/evaluate_math500.py score-synthesis \
   --run-dir outputs/evals/math500-initial-synthesis \
   --raw-run-dir outputs/evals/math500-initial-raw \
   --config configs/evals/math500_scoring.toml
 ```
 
+For a canonical run, `preregister-experiment --scoring-config ...` content-addresses
+this exact config before any result exists. Finalization rejects a changed selector
+method, seed, grader, label path, or scoring limit.
+
 Synthesis scoring refuses a different raw run, changed raw generations, changed raw
-scores, a different label digest, or a different scoring config. Reportability is
-transitive: a non-reportable raw dependency makes the synthesis report
+lineage, a different label digest, or a different scoring config. The fixed selector
+is applied to the eight source rollouts named in each synthesis request, so the
+comparison is stable across reruns and cannot be chosen from the labels. Reportability
+is transitive: a non-reportable raw dependency makes the synthesis report
 non-reportable even if its own execution provenance is otherwise valid.
+
+For every configured grader, `summary.json` reports `synthesis_accuracy`,
+`raw_baseline_accuracy`, and `paired_delta_vs_raw_baseline`, plus their standard
+errors. It also records the selector method, seed, domain, and selected-index
+histogram. `paired_scores.jsonl` contains one auditable selected-raw/synthesis pair
+per problem.
 
 ## External response ingestion
 
@@ -310,10 +333,17 @@ outputs/evals/<run>/
 ├── results/<task-id>.json     atomic, resumable per-task result
 ├── generations.jsonl          canonical plan-ordered predictions
 ├── execution.json             backend fingerprint, completeness, reportability
-├── scores.jsonl               predictions and grades, never references
+├── scores.jsonl               synthesis predictions and grades, never references
+├── paired_scores.jsonl        selected-raw/synthesis paired grades (synthesis run)
 ├── summary.json               metrics and paired analyses
-└── scoring_manifest.json      exact generation/lock/label/raw-score lineage
+└── scoring_manifest.json      exact generation/lock/label/raw-generation lineage
 ```
+
+`score-synthesis` writes its label-derived artifacts only in the synthesis run
+directory. The raw run remains unchanged and supplies verified generation bytes and
+execution provenance read-only.
+The selected-baseline synthesis summary uses schema version 2, paired rows use
+version 1, and the changed scoring-manifest lineage uses version 3.
 
 Plans and results use canonical JSON plus SHA-256 identities. Per-task publication is
 atomic. Resume skips only a valid result with the same request and backend

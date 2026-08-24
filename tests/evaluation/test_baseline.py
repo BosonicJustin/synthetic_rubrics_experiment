@@ -113,11 +113,13 @@ class FakeBackend(GenerationBackend):
         model: ModelSpec,
         *,
         missing_box: bool = False,
+        response_text: str | None = None,
         wrong_response_model: bool = False,
         finish_reason: str = "stop",
     ) -> None:
         self.calls: list[GenerationRequest] = []
         self.missing_box = missing_box
+        self.response_text = response_text
         self.wrong_response_model = wrong_response_model
         self.finish_reason = finish_reason
         self._descriptor = BackendDescriptor(
@@ -140,9 +142,13 @@ class FakeBackend(GenerationBackend):
         outputs = []
         for request in requests:
             text = (
-                "missing final answer"
-                if self.missing_box
-                else r"reasoning \boxed{42}"
+                self.response_text
+                if self.response_text is not None
+                else (
+                    "missing final answer"
+                    if self.missing_box
+                    else r"reasoning \boxed{42}"
+                )
             )
             response_model = (
                 "wrong-model" if self.wrong_response_model else request.model.model_id
@@ -312,7 +318,6 @@ class BaselineSequencerTests(unittest.TestCase):
 
     def test_canary_failures_stop_before_synthesis(self) -> None:
         cases = (
-            (FakeBackend(fixed_model(), missing_box=True), "boxed answer"),
             (FakeBackend(fixed_model(), wrong_response_model=True), "response model"),
             (
                 FakeBackend(fixed_model(), finish_reason="content_filter"),
@@ -328,6 +333,40 @@ class BaselineSequencerTests(unittest.TestCase):
                 with self.assertRaisesRegex(EvaluationError, message):
                     self._run(root, backend, canary_results=2)
                 self.assertFalse((root / "synthesis-run" / "manifest.json").exists())
+
+    def test_unextractable_canaries_are_preserved_and_counted(self) -> None:
+        cases = (
+            ("missing final answer", "missing_box"),
+            (r"\boxed{42", "malformed_box"),
+            (r"\boxed{  }", "empty_box"),
+            (r"\boxed{" + "x" * 50_001 + "}", "too_long"),
+        )
+        for response_text, status in cases:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                backend = FakeBackend(
+                    fixed_model(),
+                    response_text=response_text,
+                    finish_reason="length",
+                )
+                result = self._run(Path(temporary), backend, canary_results=2)
+
+                self.assertEqual(result["raw"]["canary"]["boxed_outputs"], 0)
+                self.assertEqual(
+                    result["raw"]["canary"]["extraction_status_counts"],
+                    {status: 2},
+                )
+                self.assertEqual(
+                    result["raw"]["canary"]["finish_reasons"],
+                    {"length": 2},
+                )
+                self.assertEqual(
+                    result["synthesis"]["canary"]["boxed_outputs"], 0
+                )
+                self.assertEqual(
+                    result["synthesis"]["canary"]["extraction_status_counts"],
+                    {status: 1},
+                )
+                self.assertEqual(len(backend.calls), 27)
 
     def test_preregistration_failure_dispatches_no_request(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -382,27 +421,35 @@ class BaselineSequencerTests(unittest.TestCase):
         self.assertEqual(len(synthesis_calls), 16)
         self.assertEqual(result["synthesis"]["canary"]["audited_results"], 16)
         self.assertEqual(result["synthesis"]["canary"]["boxed_outputs"], 16)
+        self.assertEqual(
+            result["synthesis"]["canary"]["extraction_status_counts"],
+            {"ok": 16},
+        )
 
     def test_label_derived_artifact_fails_before_config_or_endpoint(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            raw_run = root / "raw-run"
-            raw_run.mkdir()
-            (raw_run / "scores.jsonl").write_text("{}\n", encoding="utf-8")
-            with (
-                patch.object(baseline, "load_raw_config") as load_config,
-                self.assertRaisesRegex(EvaluationError, "label-derived artifacts"),
-            ):
-                baseline.run_baseline_sequence(
-                    repository_root=REPOSITORY_ROOT,
-                    raw_config_path=root / "raw.toml",
-                    synthesis_config_path=root / "synthesis.toml",
-                    raw_run_dir=raw_run,
-                    synthesis_run_dir=root / "synthesis-run",
-                    base_url="http://unused.invalid/v1",
-                    pilot=True,
-                )
-            load_config.assert_not_called()
+        for artifact_name in ("scores.jsonl", "paired_scores.jsonl"):
+            with self.subTest(artifact_name=artifact_name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    raw_run = root / "raw-run"
+                    raw_run.mkdir()
+                    (raw_run / artifact_name).write_text("{}\n", encoding="utf-8")
+                    with (
+                        patch.object(baseline, "load_raw_config") as load_config,
+                        self.assertRaisesRegex(
+                            EvaluationError, "label-derived artifacts"
+                        ),
+                    ):
+                        baseline.run_baseline_sequence(
+                            repository_root=REPOSITORY_ROOT,
+                            raw_config_path=root / "raw.toml",
+                            synthesis_config_path=root / "synthesis.toml",
+                            raw_run_dir=raw_run,
+                            synthesis_run_dir=root / "synthesis-run",
+                            base_url="http://unused.invalid/v1",
+                            pilot=True,
+                        )
+                    load_config.assert_not_called()
 
     def test_cli_exposes_one_gpu_defaults(self) -> None:
         args = cli.build_parser().parse_args(

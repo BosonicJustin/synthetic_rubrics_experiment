@@ -40,11 +40,13 @@ import test_pipeline as pipeline_fixtures  # noqa: E402
 
 def locked_scoring_config() -> ScoringConfig:
     return ScoringConfig(
-        schema_version=1,
+        schema_version=2,
         kind="scoring",
         protocol_version=MATH500_PROTOCOL_VERSION,
         labels_path="data/math500/labels.jsonl",
         dataset_lock_path="configs/datasets/math500.lock.json",
+        raw_baseline_selection="sha256_uniform_per_question_v1",
+        raw_baseline_seed=1729,
         primary_grader="last_boxed_string_exact_v1",
         diagnostic_graders=(),
         parsing_timeout_seconds=5,
@@ -191,7 +193,7 @@ class DatasetLineageTests(unittest.TestCase):
                 expected_label_rows=500,
             )
 
-    def test_synthesis_requires_the_raw_scoring_lineage_transitively(self) -> None:
+    def test_synthesis_uses_raw_generation_lineage_not_raw_scores(self) -> None:
         pipeline = pipeline_fixtures.EvaluationPipelineTests()
         pipeline.setUp()
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -211,7 +213,7 @@ class DatasetLineageTests(unittest.TestCase):
             )
             raw_scoring_path = raw_run / SCORING_MANIFEST_NAME
             raw_scoring = read_json(raw_scoring_path)
-            self.assertEqual(raw_scoring["schema_version"], 2)
+            self.assertEqual(raw_scoring["schema_version"], 3)
             self.assertFalse(raw_scoring["reportable"])
             self.assertEqual(
                 raw_scoring["dataset_lineage"]["verification"],
@@ -244,14 +246,21 @@ class DatasetLineageTests(unittest.TestCase):
                 scoring_module._scoring_manifest_fingerprint(changed)
             )
             publish_json(raw_scoring_path, changed, force=True)
-            with self.assertRaisesRegex(EvaluationError, "same exact dataset lineage"):
-                score_test_fixture_run(
-                    synthesis_run,
-                    pipeline.labels,
-                    pipeline.labels_reference,
-                    pipeline_fixtures.scoring_config(),
-                    raw_run_dir=raw_run,
-                )
+            summary = score_test_fixture_run(
+                synthesis_run,
+                pipeline.labels,
+                pipeline.labels_reference,
+                pipeline_fixtures.scoring_config(),
+                raw_run_dir=raw_run,
+            )
+            self.assertEqual(summary["counts"]["raw_baseline_generations_scored"], 2)
+            synthesis_scoring = read_json(
+                synthesis_run / SCORING_MANIFEST_NAME
+            )
+            self.assertEqual(
+                set(synthesis_scoring["inputs"]),
+                {"generations", "execution", "raw_generations", "raw_execution"},
+            )
 
     def test_score_run_verifies_execution_before_crossing_label_boundary(self) -> None:
         events: list[str] = []

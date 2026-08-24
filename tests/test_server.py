@@ -32,6 +32,14 @@ def completed(argv, value=None, *, returncode=0):
     )
 
 
+def registered_scoring_config(workflow):
+    return {
+        "stages": {
+            "scoring_config": {"path": str(workflow.scoring_config.resolve())}
+        }
+    }
+
+
 class ServerWorkflowTests(unittest.TestCase):
     def test_phase_is_preview_only_by_default(self) -> None:
         workflow = server.load_server_workflow(
@@ -47,6 +55,23 @@ class ServerWorkflowTests(unittest.TestCase):
         self.assertNotIn("--execute", commands[-1]["argv"])
         self.assertIn("--preregistration", commands[-1]["argv"])
         self.assertIn("--launch-approval", commands[-1]["argv"])
+
+    def test_registry_commands_bind_the_scoring_config(self) -> None:
+        workflow = server.load_server_workflow(
+            EXAMPLE, repository_root=REPOSITORY_ROOT
+        )
+        commands = (
+            *server.phase_commands(workflow, "preregister"),
+            *server.phase_commands(workflow, "finalize"),
+        )
+        self.assertEqual(len(commands), 3)
+        for command in commands:
+            with self.subTest(command=command.name):
+                self.assertEqual(command.argv.count("--scoring-config"), 1)
+                index = command.argv.index("--scoring-config")
+                self.assertEqual(
+                    command.argv[index + 1], str(workflow.scoring_config)
+                )
 
     def test_execute_adds_flag_only_to_existing_launch_cli(self) -> None:
         workflow = server.load_server_workflow(
@@ -123,7 +148,11 @@ class ServerWorkflowTests(unittest.TestCase):
             EXAMPLE, repository_root=REPOSITORY_ROOT
         )
         with (
-            patch.object(server, "verify_preregistered_training_stage"),
+            patch.object(
+                server,
+                "verify_preregistered_training_stage",
+                return_value=registered_scoring_config(workflow),
+            ),
             patch.object(
                 server,
                 "_verify_trained_handoff",
@@ -144,7 +173,11 @@ class ServerWorkflowTests(unittest.TestCase):
             EXAMPLE, repository_root=REPOSITORY_ROOT
         )
         with (
-            patch.object(server, "verify_preregistered_training_stage"),
+            patch.object(
+                server,
+                "verify_preregistered_training_stage",
+                return_value=registered_scoring_config(workflow),
+            ),
             patch.object(server, "_verify_trained_handoff") as verify_handoff,
             patch.object(server, "_verify_all_generation_complete"),
             patch.dict(os.environ, {"CAT_SERVICE_ROLE": "scorer"}, clear=True),
@@ -156,6 +189,34 @@ class ServerWorkflowTests(unittest.TestCase):
             )
         self.assertTrue(result["complete"])
         verify_handoff.assert_called_once_with(workflow, artifact_only=True)
+
+    def test_scorer_requires_the_preregistered_scoring_config_path(self) -> None:
+        workflow = server.load_server_workflow(
+            EXAMPLE, repository_root=REPOSITORY_ROOT
+        )
+        with (
+            patch.object(
+                server,
+                "verify_preregistered_training_stage",
+                return_value={
+                    "stages": {
+                        "scoring_config": {"path": "/different/scoring.toml"}
+                    }
+                },
+            ),
+            patch.object(server, "_verify_trained_handoff") as verify_handoff,
+            patch.dict(os.environ, {"CAT_SERVICE_ROLE": "scorer"}, clear=True),
+            self.assertRaisesRegex(
+                server.ServerWorkflowError,
+                "does not match the experiment preregistration",
+            ),
+        ):
+            server.execute_phase(
+                workflow,
+                "baseline-scoring",
+                runner=lambda *_args, **_kwargs: self.fail("must not score"),
+            )
+        verify_handoff.assert_not_called()
 
     def test_baseline_endpoint_argv_has_one_safe_base_url(self) -> None:
         workflow = server.load_server_workflow(
@@ -202,6 +263,17 @@ class ServerWorkflowTests(unittest.TestCase):
         self.assertTrue(
             all(command.name.startswith("score_") for command in trained_scoring)
         )
+        self.assertEqual(
+            [command.name for command in baseline_scoring],
+            ["score_initial_synthesis"],
+        )
+        self.assertEqual(
+            [command.name for command in trained_scoring],
+            ["score_trained_synthesis"],
+        )
+        for command in (*baseline_scoring, *trained_scoring):
+            self.assertIn("score-synthesis", command.argv)
+            self.assertNotIn("score-raw", command.argv)
         self.assertEqual(
             server.preview_phase(workflow, "baseline-generation")["execution_scope"],
             "evaluator",
@@ -321,7 +393,11 @@ class ServerWorkflowTests(unittest.TestCase):
             EXAMPLE, repository_root=REPOSITORY_ROOT
         )
         with (
-            patch.object(server, "verify_preregistered_training_stage"),
+            patch.object(
+                server,
+                "verify_preregistered_training_stage",
+                return_value=registered_scoring_config(workflow),
+            ),
             patch.object(server, "_verify_trained_handoff"),
             patch.object(
                 server,
@@ -337,34 +413,70 @@ class ServerWorkflowTests(unittest.TestCase):
                 runner=lambda *_args, **_kwargs: self.fail("must not score"),
             )
 
-    def test_generation_rejects_existing_label_derived_artifacts(self) -> None:
+    def test_finalization_verifies_only_paired_synthesis_scores(self) -> None:
         workflow = server.load_server_workflow(
             EXAMPLE, repository_root=REPOSITORY_ROOT
         )
-        with tempfile.TemporaryDirectory() as temporary:
-            initial_raw = Path(temporary) / "initial-raw"
-            initial_raw.mkdir()
-            (initial_raw / server.SCORES_NAME).write_text("\n", encoding="utf-8")
-            workflow = replace(workflow, initial_raw_run=initial_raw)
-            with (
-                patch.dict(
-                    os.environ,
-                    {
-                        "CAT_SERVICE_ROLE": "evaluator",
-                        "CAT_ANCHOR_API_KEY": "anchor",
-                    },
-                    clear=True,
-                ),
-                self.assertRaisesRegex(
-                    server.ServerWorkflowError,
-                    "label-derived artifacts",
-                ),
-            ):
-                server.execute_phase(
-                    workflow,
-                    "baseline-generation",
-                    runner=lambda *_args, **_kwargs: self.fail("must not generate"),
+        scoring_config = object()
+        with (
+            patch.object(
+                server,
+                "load_scoring_config",
+                return_value=scoring_config,
+            ),
+            patch.object(server, "score_run") as score_run,
+        ):
+            server._verify_scored_experiment(workflow)
+
+        self.assertEqual(score_run.call_count, 2)
+        expected = (
+            (workflow.initial_raw_run, workflow.initial_synthesis_run),
+            (workflow.trained_raw_run, workflow.trained_synthesis_run),
+        )
+        for invocation, (raw_run, synthesis_run) in zip(
+            score_run.call_args_list, expected, strict=True
+        ):
+            self.assertEqual(invocation.args, (synthesis_run, scoring_config))
+            self.assertEqual(
+                invocation.kwargs,
+                {
+                    "repository_root": workflow.repository_root,
+                    "raw_run_dir": raw_run,
+                },
+            )
+
+    def test_generation_rejects_existing_label_derived_artifacts(self) -> None:
+        for artifact_name in (server.SCORES_NAME, server.PAIRED_SCORES_NAME):
+            with self.subTest(artifact_name=artifact_name):
+                workflow = server.load_server_workflow(
+                    EXAMPLE, repository_root=REPOSITORY_ROOT
                 )
+                with tempfile.TemporaryDirectory() as temporary:
+                    initial_raw = Path(temporary) / "initial-raw"
+                    initial_raw.mkdir()
+                    (initial_raw / artifact_name).write_text("\n", encoding="utf-8")
+                    workflow = replace(workflow, initial_raw_run=initial_raw)
+                    with (
+                        patch.dict(
+                            os.environ,
+                            {
+                                "CAT_SERVICE_ROLE": "evaluator",
+                                "CAT_ANCHOR_API_KEY": "anchor",
+                            },
+                            clear=True,
+                        ),
+                        self.assertRaisesRegex(
+                            server.ServerWorkflowError,
+                            "label-derived artifacts",
+                        ),
+                    ):
+                        server.execute_phase(
+                            workflow,
+                            "baseline-generation",
+                            runner=lambda *_args, **_kwargs: self.fail(
+                                "must not generate"
+                            ),
+                        )
 
     def test_generation_verification_uses_server_error_contract(self) -> None:
         workflow = server.load_server_workflow(

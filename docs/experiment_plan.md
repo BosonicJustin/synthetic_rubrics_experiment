@@ -18,29 +18,31 @@ a paper fact.
 | Qwen generation | Temperature `0.7`, top-p `0.8`, top-k `20`, `/no_think`, and 1,536 generated tokens. | Lock the otherwise unpublished model/tokenizer revision, chat-template bytes, adapter, `do_sample`, one-sequence, repetition, stop, and runtime choices. |
 | GRPO run | LR `5e-7`, constant schedule, no warmup, global batch 256, reward KL `1e-3`, 1,000 steps, AdamW, FSDP, eight H100s, and per-response token averaging in Eq. 6. | Interpret the unpublished batch unit as prompts; pin sequence-mean/token-mean loss aggregation; verify Verl's FSDP actor constructs AdamW; and lock the unpublished `ddof`, epsilon, clip, PPO epochs and mini-batch, sampled-token KL estimator/controller, optimizer details, and distributed stack. |
 | Raw inputs and randomness | The exact raw problem prompt, rollout delimiters, and seeds are not published. | Treat the versioned raw prompt, delimiters, and seeds as preregistered local choices and blockers to a byte-exact claim. |
-| Reported raw “single” score | The paper defines it as one rollout but does not identify a deterministic sample index. | Use rollout 0 as the predeclared single sample; report mean-of-eight only as a diagnostic. |
+| Reported raw “single” score | The paper defines it as one rollout but does not identify a deterministic sample index. | Select one of the eight existing rollouts per problem with the preregistered `sha256_uniform_per_question_v1` selector and seed `1729`; make no additional raw inference call. |
 
 ## Hypotheses and metrics
 
 The canonical run uses data-order seed `42`, policy-rollout base seed `1729`,
-synthesis base seed `2718`, and the fixed step-1,000 checkpoint. These are separate
-seed streams; the code does not claim that `42` initializes every framework RNG.
+synthesis base seed `2718`, raw-baseline selector seed `1729`, and the fixed
+step-1,000 checkpoint. Generation and comparison selection are domain-separated
+seed streams even where their numeric values match; the code does not claim that
+`42` initializes every framework RNG.
 
 - H1: frozen initial-policy synthesis improves accuracy over initial-policy raw
-  rollout 0.
-- H2: the final trained policy's raw rollout-0 accuracy exceeds the initial raw
-  rollout-0 accuracy.
+  selected baseline.
+- H2: the final trained policy's selected raw-baseline accuracy exceeds the initial
+  selected raw-baseline accuracy.
 - H3: frozen initial-policy synthesis over final-policy rollouts improves accuracy
-  over final-policy raw rollout 0.
+  over the final-policy selected raw baseline.
 
-Primary metrics are raw rollout-0 accuracy, synthesis accuracy, and their paired
-deltas. Also report mean-of-eight raw accuracy, empirical any-correct-at-eight,
-literal plurality accuracy, extraction-failure rates, and the standard errors already
-emitted by scoring. Report every predeclared comparison even when its sign is not as
+Primary metrics are selected raw-baseline accuracy, synthesis accuracy, and their
+paired delta, with corresponding standard errors. Also report selected-rollout-index
+counts, extraction-failure rates for both members of each pair, and disagreement
+diagnostics. Report every predeclared comparison even when its sign is not as
 hypothesized.
 
-The emitted synthesis-versus-selection disagreement diagnostics belong to this
-single-seed run. Do not present them as a reproduction of paper Table 1, which
+The emitted paired disagreement diagnostics belong to this single-seed run. Do not
+present them as a reproduction of paper Table 1, which
 averages seven seeds, unless the multi-seed extension below is preregistered and run.
 
 Training gates are label-free. Record reward mean and variance, zero/one reward
@@ -104,8 +106,9 @@ qualification decision. Review each named gate and archive an explicit sign-off;
   hardware evidence in the manual attestation; the current schema binds endpoint
   canaries, not the external anchor process itself.
 - Freeze initial and final evaluation seeds. Preregister the initial raw plan,
-  intended synthesis contract, and canonical training plan now; the final checkpoint
-  and final evaluation plans are joined later by `finalize-experiment`.
+  intended synthesis contract, exact scoring config with raw-baseline selector and
+  seed, and canonical training plan now; the final checkpoint and final evaluation
+  plans are joined later by `finalize-experiment`.
 - Write `preregister-experiment` after the initial raw and canonical training plans
   exist but before raw results, trainer logs, rollout logs, or checkpoints exist.
 - Gate: all local identities resolve, the label firewall passes, and dependencies
@@ -134,10 +137,12 @@ qualification decision. Review each named gate and archive an explicit sign-off;
   with the boxed answer preserved at the tail,
   response schema, extraction, latency, and that synthesis receives no separate
   question or label.
-- Gate: zero request failures, stable endpoint identity, successful resume, and
-  valid boxed extraction. Then complete raw execution, write the 500-row synthesis
-  plan, and complete synthesis. Do not score yet; the labels boundary remains closed
-  until terminal training, guarded handoff, and trained-policy generation finish.
+- Gate: zero request failures, stable endpoint identity, and successful resume.
+  Record boxed-extraction status counts, but preserve missing, malformed, empty, and
+  over-limit answers as ordinary incorrect samples. Then complete raw execution,
+  write the 500-row synthesis plan, and complete synthesis. Do not score yet; the
+  labels boundary remains closed until terminal training, guarded handoff, and
+  trained-policy generation finish.
 
 ### 3. One-step training smoke
 
@@ -186,21 +191,23 @@ locked GPU environment.
 - Merge and register the fixed checkpoint, then evaluate `pi_T` raw rollouts and
   frozen-`pi_0` synthesis using the predeclared evaluation seeds.
 - Only after all four generation runs verify complete, start the offline scorer and
-  score the initial raw/synthesis pair and trained raw/synthesis pair exactly once.
+  score each synthesis run against its deterministically selected existing raw
+  baseline exactly once.
 - Finalize and reverify the cross-stage registry after all four evaluation plans and
   the fixed checkpoint exist. It must record `pi_T` rollouts synthesized by frozen
   `pi_0`; it does not replace archival of results or scores.
 - Gate: all stage fingerprints link, environment and anchor identities remained
-  fixed, the terminal export loads, and both raw and synthesis score artifacts verify.
+  fixed, the terminal export loads, and both paired scoring artifacts verify.
 
 ### 7. Optional multi-seed robustness
 
-The registered v1 profile intentionally locks its three seed streams. A multi-seed
+The registered v1 profile intentionally locks its generation, data-order, and
+comparison-selection seed streams. A multi-seed
 extension therefore requires a new protocol version that explicitly varies data
-order, policy rollouts, synthesis, and any framework RNGs discovered during target
-runtime qualification. Predeclare every seed tuple, keep evaluation requests common
-across compared checkpoints, report every run, and never select the best seed as the
-headline result.
+order, policy rollouts, synthesis, comparison selection, and any framework RNGs
+discovered during target runtime qualification. Predeclare every seed tuple, keep
+evaluation requests common across compared checkpoints, report every run, and never
+select the best seed as the headline result.
 
 ## Required run record
 

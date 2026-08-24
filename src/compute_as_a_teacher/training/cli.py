@@ -581,6 +581,7 @@ def _preregister_experiment(args: argparse.Namespace) -> dict[str, Any]:
         _repo_path(args.output),
         _repo_path(args.initial_raw_run_dir),
         _repo_path(args.initial_synthesis_config),
+        _repo_path(args.scoring_config),
         _repo_path(args.training_run_dir),
         force=args.force,
     )
@@ -598,6 +599,7 @@ def _finalize_experiment(args: argparse.Namespace) -> dict[str, Any]:
     value = write_final_experiment_registry(
         _repo_path(args.output),
         _repo_path(args.preregistration),
+        _repo_path(args.scoring_config),
         _repo_path(args.initial_raw_run_dir),
         _repo_path(args.initial_synthesis_run_dir),
         _repo_path(args.training_run_dir),
@@ -619,6 +621,7 @@ def _verify_experiment(args: argparse.Namespace) -> dict[str, Any]:
     value = verify_final_experiment_registry(
         _repo_path(args.registry),
         _repo_path(args.preregistration),
+        _repo_path(args.scoring_config),
         _repo_path(args.initial_raw_run_dir),
         _repo_path(args.initial_synthesis_run_dir),
         _repo_path(args.training_run_dir),
@@ -819,11 +822,13 @@ def build_parser() -> argparse.ArgumentParser:
     preregister.add_argument("--output", type=Path, required=True)
     preregister.add_argument("--initial-raw-run-dir", type=Path, required=True)
     preregister.add_argument("--initial-synthesis-config", type=Path, required=True)
+    preregister.add_argument("--scoring-config", type=Path, required=True)
     preregister.add_argument("--training-run-dir", type=Path, required=True)
     preregister.add_argument("--force", action="store_true")
 
     def add_registry_inputs(command: argparse.ArgumentParser) -> None:
         command.add_argument("--preregistration", type=Path, required=True)
+        command.add_argument("--scoring-config", type=Path, required=True)
         command.add_argument("--initial-raw-run-dir", type=Path, required=True)
         command.add_argument("--initial-synthesis-run-dir", type=Path, required=True)
         command.add_argument("--training-run-dir", type=Path, required=True)

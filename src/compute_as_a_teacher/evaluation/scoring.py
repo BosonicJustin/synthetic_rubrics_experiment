@@ -16,12 +16,11 @@ from .artifacts import (
     canonical_jsonl_bytes,
     file_digest,
     publish_bytes,
-    read_json,
     read_jsonl,
     sha256_bytes,
     sha256_text,
 )
-from .config import ScoringConfig
+from .config import RAW_BASELINE_SELECTION_METHOD, ScoringConfig
 from .errors import EvaluationError
 from .execution import verify_complete_execution
 from .grading import grade_response
@@ -33,10 +32,14 @@ from .schemas import (
 
 
 SCORES_NAME = "scores.jsonl"
+PAIRED_SCORES_NAME = "paired_scores.jsonl"
 SUMMARY_NAME = "summary.json"
 SCORING_MANIFEST_NAME = "scoring_manifest.json"
-SCORING_MANIFEST_SCHEMA_VERSION = 2
+SCORING_MANIFEST_SCHEMA_VERSION = 3
 DATASET_LINEAGE_SCHEMA_VERSION = 1
+RAW_BASELINE_SELECTION_DOMAIN = (
+    "compute_as_a_teacher/raw_baseline/sha256_uniform_per_question_v1"
+)
 SAFE_ARTIFACT_REFERENCE_KEYS = frozenset({"path", "sha256", "bytes"})
 SAFE_ROW_ARTIFACT_REFERENCE_KEYS = frozenset(
     {"path", "sha256", "bytes", "rows"}
@@ -619,6 +622,156 @@ def _extraction_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def raw_baseline_selection(
+    protocol_version: str,
+    seed: int,
+    question_id: str,
+    *,
+    rollouts: int = 8,
+) -> tuple[int, str]:
+    """Choose a raw rollout without relying on process-global randomness."""
+
+    if not isinstance(protocol_version, str) or not protocol_version:
+        raise EvaluationError("Selection protocol version must be nonempty")
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**63:
+        raise EvaluationError("Raw-baseline seed must be in [0, 2^63)")
+    if not isinstance(question_id, str) or not question_id:
+        raise EvaluationError("Selection question ID must be nonempty")
+    if isinstance(rollouts, bool) or not isinstance(rollouts, int) or rollouts <= 0:
+        raise EvaluationError("Raw-baseline rollout count must be positive")
+    payload = canonical_json_bytes(
+        [
+            RAW_BASELINE_SELECTION_DOMAIN,
+            protocol_version,
+            seed,
+            question_id,
+        ]
+    )
+    digest = sha256_bytes(payload)
+    return int(digest, 16) % rollouts, digest
+
+
+def select_raw_baseline_generations(
+    raw_generations: Sequence[Mapping[str, Any]],
+    synthesis_generations: Sequence[Mapping[str, Any]],
+    config: ScoringConfig,
+    *,
+    expected_rollouts: int = 8,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Select one verified existing raw generation for each synthesis result."""
+
+    if config.raw_baseline_selection != RAW_BASELINE_SELECTION_METHOD:
+        raise EvaluationError("Unsupported raw-baseline selection method")
+    raw_groups: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for generation in raw_generations:
+        _validate_generation_row(generation, "raw")
+        raw_groups[str(generation["question_id"])].append(generation)
+    synth_by_id: dict[str, Mapping[str, Any]] = {}
+    for generation in synthesis_generations:
+        _validate_generation_row(generation, "synthesis")
+        question_id = str(generation["question_id"])
+        if question_id in synth_by_id:
+            raise EvaluationError(
+                f"Duplicate synthesis generation for question {question_id}"
+            )
+        synth_by_id[question_id] = generation
+    if set(synth_by_id) != set(raw_groups):
+        raise EvaluationError("Raw and synthesis generation coverage must match")
+
+    selected: list[dict[str, Any]] = []
+    selection_by_id: dict[str, dict[str, Any]] = {}
+    for question_id in sorted(synth_by_id):
+        rows = sorted(
+            raw_groups[question_id], key=lambda row: int(row["rollout_index"])
+        )
+        indexes = [row["rollout_index"] for row in rows]
+        if indexes != list(range(expected_rollouts)):
+            raise EvaluationError(
+                f"Raw generation group {question_id} does not contain indexes "
+                f"0..{expected_rollouts - 1}"
+            )
+        expected_source_ids = [str(row["task_id"]) for row in rows]
+        if synth_by_id[question_id]["source_task_ids"] != expected_source_ids:
+            raise EvaluationError(
+                f"Synthesis source lineage does not match raw group {question_id}"
+            )
+        rollout_index, digest = raw_baseline_selection(
+            config.protocol_version,
+            config.raw_baseline_seed,
+            question_id,
+            rollouts=expected_rollouts,
+        )
+        row = dict(rows[rollout_index])
+        selected.append(row)
+        selection_by_id[question_id] = {
+            "method": config.raw_baseline_selection,
+            "seed": config.raw_baseline_seed,
+            "domain": RAW_BASELINE_SELECTION_DOMAIN,
+            "digest_sha256": digest,
+            "rollout_index": rollout_index,
+            "task_id": row["task_id"],
+        }
+    return selected, selection_by_id
+
+
+def build_paired_score_rows(
+    synthesis_scores: Sequence[Mapping[str, Any]],
+    raw_baseline_scores: Sequence[Mapping[str, Any]],
+    selections: Mapping[str, Mapping[str, Any]],
+    config: ScoringConfig,
+) -> list[dict[str, Any]]:
+    synth_by_id = {str(row["question_id"]): row for row in synthesis_scores}
+    raw_by_id = {str(row["question_id"]): row for row in raw_baseline_scores}
+    if (
+        len(synth_by_id) != len(synthesis_scores)
+        or len(raw_by_id) != len(raw_baseline_scores)
+        or set(synth_by_id) != set(raw_by_id)
+        or set(synth_by_id) != set(selections)
+    ):
+        raise EvaluationError("Paired score coverage must be one-to-one")
+    graders = (config.primary_grader, *config.diagnostic_graders)
+    pairs: list[dict[str, Any]] = []
+    for question_id in sorted(synth_by_id):
+        synthesis = synth_by_id[question_id]
+        raw = raw_by_id[question_id]
+        selection = selections[question_id]
+        if (
+            selection.get("task_id") != raw["task_id"]
+            or selection.get("rollout_index") != raw["rollout_index"]
+        ):
+            raise EvaluationError(
+                f"Raw score does not match the selection for {question_id}"
+            )
+        pairs.append(
+            {
+                "schema_version": 1,
+                "question_id": question_id,
+                "selection": dict(selection),
+                "synthesis": {
+                    "task_id": synthesis["task_id"],
+                    "output_sha256": synthesis["generation_output_sha256"],
+                    "extraction": synthesis["extraction"],
+                    "grades": synthesis["grades"],
+                },
+                "raw_baseline": {
+                    "task_id": raw["task_id"],
+                    "rollout_index": raw["rollout_index"],
+                    "output_sha256": raw["generation_output_sha256"],
+                    "extraction": raw["extraction"],
+                    "grades": raw["grades"],
+                },
+                "grader_deltas": {
+                    grader: int(synthesis["grades"][grader]["correct"])
+                    - int(raw["grades"][grader]["correct"])
+                    for grader in graders
+                },
+                "subject": synthesis["subject"],
+                "level": synthesis["level"],
+            }
+        )
+    return pairs
+
+
 def summarize_raw_scores(
     scores: Sequence[Mapping[str, Any]],
     config: ScoringConfig,
@@ -694,9 +847,9 @@ def summarize_raw_scores(
         },
         "protocol_notes": {
             "raw_primary": (
-                "The paper does not specify which sample represents its raw score. "
-                "This protocol predeclares rollout index 0 as the paired primary "
-                "and reports the mean across all eight separately."
+                "This optional legacy all-rollout diagnostic reports index 0 and "
+                "the mean across eight. It does not define the paired primary; "
+                "score-synthesis uses the preregistered raw-baseline selector."
             ),
             "plurality": (
                 "Plurality groups literal extracted answer strings and breaks ties "
@@ -708,100 +861,74 @@ def summarize_raw_scores(
 
 def summarize_synthesis_scores(
     scores: Sequence[Mapping[str, Any]],
-    raw_scores: Sequence[Mapping[str, Any]],
+    raw_baseline_scores: Sequence[Mapping[str, Any]],
+    paired_scores: Sequence[Mapping[str, Any]],
     config: ScoringConfig,
     *,
-    expected_rollouts: int = 8,
+    raw_candidate_generations: int,
     non_reportable_reasons: Sequence[str] = (),
 ) -> dict[str, Any]:
     if len({row["question_id"] for row in scores}) != len(scores):
         raise EvaluationError("Synthesis scoring requires one result per question")
     synth_by_id = {str(row["question_id"]): row for row in scores}
-    raw_groups: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    for row in raw_scores:
-        raw_groups[str(row["question_id"])].append(row)
-    if set(synth_by_id) != set(raw_groups):
-        raise EvaluationError("Raw and synthesis score coverage must match")
-    for question_id, rows in raw_groups.items():
-        rows.sort(key=lambda row: int(row["rollout_index"]))
-        indexes = [int(row["rollout_index"]) for row in rows]
-        if indexes != list(range(expected_rollouts)):
-            raise EvaluationError(
-                f"Raw score group {question_id} does not contain indexes "
-                f"0..{expected_rollouts - 1}"
-            )
-        source_ids = list(synth_by_id[question_id]["source_task_ids"])
-        expected_source_ids = [str(row["task_id"]) for row in rows]
-        if source_ids != expected_source_ids:
-            raise EvaluationError(
-                f"Synthesis source lineage does not match raw group {question_id}"
-            )
+    raw_by_id = {str(row["question_id"]): row for row in raw_baseline_scores}
+    if len(raw_by_id) != len(raw_baseline_scores) or set(synth_by_id) != set(raw_by_id):
+        raise EvaluationError("Raw-baseline and synthesis score coverage must match")
+    if len(paired_scores) != len(scores):
+        raise EvaluationError("Paired-score coverage must match synthesis scores")
 
     graders = (config.primary_grader, *config.diagnostic_graders)
     grader_metrics: dict[str, Any] = {}
     for grader in graders:
         synthesis_values: list[float] = []
-        raw_zero_values: list[float] = []
-        raw_mean_values: list[float] = []
-        paired_vs_zero: list[float] = []
-        paired_vs_mean: list[float] = []
+        raw_values: list[float] = []
+        paired_deltas: list[float] = []
         for question_id in sorted(synth_by_id):
             synthesis_row = synth_by_id[question_id]
-            rows = raw_groups[question_id]
+            raw_row = raw_by_id[question_id]
             synthesis_correct = float(
                 bool(synthesis_row["grades"][grader]["correct"])
             )
-            raw_zero_correct = float(bool(rows[0]["grades"][grader]["correct"]))
-            raw_mean = sum(
-                bool(row["grades"][grader]["correct"]) for row in rows
-            ) / len(rows)
+            raw_correct = float(bool(raw_row["grades"][grader]["correct"]))
             synthesis_values.append(synthesis_correct)
-            raw_zero_values.append(raw_zero_correct)
-            raw_mean_values.append(raw_mean)
-            paired_vs_zero.append(synthesis_correct - raw_zero_correct)
-            paired_vs_mean.append(synthesis_correct - raw_mean)
+            raw_values.append(raw_correct)
+            paired_deltas.append(synthesis_correct - raw_correct)
         grader_metrics[grader] = {
             "synthesis_accuracy": _mean(synthesis_values),
             "synthesis_standard_error": _standard_error(synthesis_values),
-            "raw_rollout_index_0_accuracy": _mean(raw_zero_values),
-            "raw_mean_rollout_accuracy": _mean(raw_mean_values),
-            "paired_delta_vs_raw_index_0": _mean(paired_vs_zero),
-            "paired_delta_vs_raw_index_0_standard_error": _standard_error(
-                paired_vs_zero
-            ),
-            "paired_delta_vs_raw_mean": _mean(paired_vs_mean),
-            "paired_delta_vs_raw_mean_standard_error": _standard_error(
-                paired_vs_mean
+            "raw_baseline_accuracy": _mean(raw_values),
+            "raw_baseline_standard_error": _standard_error(raw_values),
+            "paired_delta_vs_raw_baseline": _mean(paired_deltas),
+            "paired_delta_vs_raw_baseline_standard_error": _standard_error(
+                paired_deltas
             ),
         }
 
     comparable = 0
     disagreements = 0
     correct_when_disagree = 0
-    synthesis_correct_all_raw_wrong = 0
     primary = config.primary_grader
     for question_id in sorted(synth_by_id):
         synthesis_row = synth_by_id[question_id]
-        rows = raw_groups[question_id]
-        plurality = _literal_plurality_row(rows)
+        raw_row = raw_by_id[question_id]
         synth_answer = synthesis_row["extraction"]["value"]
-        plurality_answer = plurality["extraction"]["value"] if plurality else None
-        if synth_answer is not None and plurality_answer is not None:
+        raw_answer = raw_row["extraction"]["value"]
+        if synth_answer is not None and raw_answer is not None:
             comparable += 1
-            if str(synth_answer).strip() != str(plurality_answer).strip():
+            if str(synth_answer).strip() != str(raw_answer).strip():
                 disagreements += 1
                 correct_when_disagree += int(
                     synthesis_row["grades"][primary]["correct"]
                 )
-        if synthesis_row["grades"][primary]["correct"] and not any(
-            row["grades"][primary]["correct"] for row in rows
-        ):
-            synthesis_correct_all_raw_wrong += 1
 
     primary_rows = [synth_by_id[question_id] for question_id in sorted(synth_by_id)]
+    selected_rows = [raw_by_id[question_id] for question_id in sorted(raw_by_id)]
+    rollout_histogram = Counter(
+        int(row["selection"]["rollout_index"]) for row in paired_scores
+    )
     reasons = sorted(set(non_reportable_reasons))
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "stage": "synthesis",
         "reportable": not reasons,
         "non_reportable_reasons": reasons,
@@ -810,29 +937,34 @@ def summarize_synthesis_scores(
         "counts": {
             "problems": len(scores),
             "synthesis_generations": len(scores),
-            "raw_generations": len(raw_scores),
-            "raw_rollouts_per_problem": expected_rollouts,
+            "raw_candidate_generations": raw_candidate_generations,
+            "raw_baseline_generations_scored": len(raw_baseline_scores),
         },
         "extraction": {
             "synthesis": _extraction_summary(primary_rows),
-            "raw": _extraction_summary(raw_scores),
+            "raw_baseline": _extraction_summary(selected_rows),
         },
         "graders": grader_metrics,
         "primary_breakdown": {
             "subject": _breakdown(primary_rows, "subject", primary),
             "level": _breakdown(primary_rows, "level", primary),
         },
+        "raw_baseline_selection": {
+            "method": config.raw_baseline_selection,
+            "seed": config.raw_baseline_seed,
+            "domain": RAW_BASELINE_SELECTION_DOMAIN,
+            "rollout_index_counts": {
+                str(index): rollout_histogram.get(index, 0) for index in range(8)
+            },
+        },
         "synthesis_analysis": {
-            "literal_plurality_comparable_problems": comparable,
-            "disagrees_with_literal_plurality_count": disagreements,
-            "disagrees_with_literal_plurality_rate": (
+            "raw_baseline_comparable_problems": comparable,
+            "disagrees_with_raw_baseline_count": disagreements,
+            "disagrees_with_raw_baseline_rate": (
                 disagreements / comparable if comparable else None
             ),
-            "accuracy_when_disagreeing_with_literal_plurality": (
+            "synthesis_accuracy_when_disagreeing_with_raw_baseline": (
                 correct_when_disagree / disagreements if disagreements else None
-            ),
-            f"correct_when_all_{expected_rollouts}_raw_rollouts_wrong_count": (
-                synthesis_correct_all_raw_wrong
             ),
         },
     }
@@ -967,102 +1099,6 @@ def _test_fixture_dataset_lineage(
     )
 
 
-def _load_verified_raw_scoring(
-    raw_run_dir: Path,
-    raw_manifest: Mapping[str, Any],
-    config: ScoringConfig,
-    labels_reference: Mapping[str, Any],
-    dataset_lineage: Mapping[str, Any],
-    raw_generations: Sequence[Mapping[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    path = raw_run_dir / SCORING_MANIFEST_NAME
-    scoring_manifest = read_json(path)
-    expected_keys = {
-        "schema_version",
-        "stage",
-        "plan_fingerprint",
-        "config",
-        "labels",
-        "dataset_lineage",
-        "solution_retained",
-        "inputs",
-        "artifacts",
-        "reportable",
-        "non_reportable_reasons",
-        "scoring_fingerprint",
-    }
-    if set(scoring_manifest) != expected_keys or scoring_manifest.get(
-        "schema_version"
-    ) != SCORING_MANIFEST_SCHEMA_VERSION:
-        raise EvaluationError("Invalid raw scoring-manifest schema")
-    if scoring_manifest.get("scoring_fingerprint") != _scoring_manifest_fingerprint(
-        scoring_manifest
-    ):
-        raise EvaluationError("Raw scoring-manifest fingerprint mismatch")
-    if scoring_manifest.get("stage") != "raw":
-        raise EvaluationError("Upstream scoring manifest is not raw")
-    if scoring_manifest.get("plan_fingerprint") != raw_manifest.get("plan_fingerprint"):
-        raise EvaluationError("Raw scoring manifest does not match the raw plan")
-    if scoring_manifest.get("config") != config.to_dict():
-        raise EvaluationError("Raw and synthesis runs must use the same scoring config")
-    if scoring_manifest.get("labels") != labels_reference:
-        raise EvaluationError("Raw and synthesis runs must use the same labels artifact")
-    if scoring_manifest.get("dataset_lineage") != dataset_lineage:
-        raise EvaluationError(
-            "Raw and synthesis scoring must use the same exact dataset lineage"
-        )
-    reasons = scoring_manifest.get("non_reportable_reasons")
-    if (
-        scoring_manifest.get("solution_retained") is not False
-        or not isinstance(reasons, list)
-        or not all(isinstance(reason, str) for reason in reasons)
-        or bool(reasons) == bool(scoring_manifest.get("reportable"))
-    ):
-        raise EvaluationError("Raw scoring reportability or firewall fields are invalid")
-    inputs = scoring_manifest.get("inputs")
-    if not isinstance(inputs, dict) or set(inputs) != {
-        "generations",
-        "execution",
-        "raw_scores",
-        "raw_scoring_manifest",
-    }:
-        raise EvaluationError("Raw scoring-manifest inputs are malformed")
-    generation_reference = inputs.get("generations")
-    if not isinstance(generation_reference, dict) or not _reference_matches(
-        generation_reference,
-        raw_run_dir / GENERATIONS_NAME,
-        expected_path=GENERATIONS_NAME,
-        rows=len(raw_generations),
-    ):
-        raise EvaluationError(
-            "Raw generations have changed since the raw scores were produced"
-        )
-    execution_reference = inputs.get("execution")
-    if not isinstance(execution_reference, dict) or not _reference_matches(
-        execution_reference,
-        raw_run_dir / EXECUTION_NAME,
-        expected_path=EXECUTION_NAME,
-    ):
-        raise EvaluationError(
-            "Raw execution provenance has changed since the raw scores were produced"
-        )
-    if inputs.get("raw_scores") is not None or inputs.get(
-        "raw_scoring_manifest"
-    ) is not None:
-        raise EvaluationError("A raw scoring manifest cannot have raw-score inputs")
-    scores_path = raw_run_dir / SCORES_NAME
-    scores = read_jsonl(scores_path)
-    score_reference = scoring_manifest.get("artifacts", {}).get("scores")
-    if not isinstance(score_reference, dict) or not _reference_matches(
-        score_reference,
-        scores_path,
-        expected_path=SCORES_NAME,
-        rows=len(scores),
-    ):
-        raise EvaluationError("Raw score artifact does not match its scoring manifest")
-    return _validate_and_order_scores(scores, raw_generations, config), scoring_manifest
-
-
 def _generation_totals(generations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     prompt_tokens = [row["usage"]["prompt_tokens"] for row in generations]
     completion_tokens = [row["usage"]["completion_tokens"] for row in generations]
@@ -1121,9 +1157,9 @@ def _score_run_with_labels(
         *label_non_reportable_reasons,
     ]
 
-    raw_scores: list[dict[str, Any]] = []
-    raw_score_reference: dict[str, Any] | None = None
-    raw_scoring_reference: dict[str, Any] | None = None
+    paired_scores: list[dict[str, Any]] = []
+    raw_generation_reference: dict[str, Any] | None = None
+    raw_execution_reference: dict[str, Any] | None = None
     safe_dataset_lineage: dict[str, Any]
     if stage == "raw":
         candidate_lineage = dataset_lineage or _test_fixture_dataset_lineage(
@@ -1198,36 +1234,47 @@ def _score_run_with_labels(
             raise EvaluationError(
                 "Raw generations no longer match the synthesis plan input"
             )
-        raw_scores, raw_scoring_manifest = _load_verified_raw_scoring(
-            raw_run_dir,
-            raw_manifest,
-            config,
-            safe_labels_reference,
-            safe_dataset_lineage,
+        selected_raw_generations, selections = select_raw_baseline_generations(
             raw_generations,
+            generations,
+            config,
         )
-        raw_score_reference = _artifact_reference(
-            raw_run_dir / SCORES_NAME,
-            "upstream/raw/scores.jsonl",
-            rows=len(raw_scores),
+        raw_baseline_scores = score_generation_rows(
+            selected_raw_generations,
+            labels,
+            config,
+            expected_stage="raw",
         )
-        raw_scoring_reference = _artifact_reference(
-            raw_run_dir / SCORING_MANIFEST_NAME,
-            "upstream/raw/scoring_manifest.json",
+        raw_baseline_scores = _validate_and_order_scores(
+            raw_baseline_scores,
+            selected_raw_generations,
+            config,
+        )
+        paired_scores = build_paired_score_rows(
+            scores,
+            raw_baseline_scores,
+            selections,
+            config,
+        )
+        raw_generation_reference = _artifact_reference(
+            raw_run_dir / GENERATIONS_NAME,
+            "upstream/raw/generations.jsonl",
+            rows=len(raw_generations),
+        )
+        raw_execution_reference = _artifact_reference(
+            raw_run_dir / EXECUTION_NAME,
+            "upstream/raw/execution.json",
         )
         reportability_reasons.extend(
             f"raw_dependency:{reason}"
             for reason in raw_execution["non_reportable_reasons"]
         )
-        reportability_reasons.extend(
-            f"raw_scoring:{reason}"
-            for reason in raw_scoring_manifest.get("non_reportable_reasons", [])
-        )
         summary = summarize_synthesis_scores(
             scores,
-            raw_scores,
+            raw_baseline_scores,
+            paired_scores,
             config,
-            expected_rollouts=8,
+            raw_candidate_generations=len(raw_generations),
             non_reportable_reasons=reportability_reasons,
         )
         summary["execution_totals"] = {
@@ -1238,6 +1285,7 @@ def _score_run_with_labels(
         summary["execution_totals"] = _generation_totals(generations)
 
     scores_payload = canonical_jsonl_bytes(scores)
+    paired_scores_payload = canonical_jsonl_bytes(paired_scores)
     summary_payload = canonical_json_bytes(summary)
     generations_reference = _artifact_reference(
         run_dir / GENERATIONS_NAME,
@@ -1248,6 +1296,35 @@ def _score_run_with_labels(
         run_dir / EXECUTION_NAME,
         EXECUTION_NAME,
     )
+    manifest_inputs = (
+        {
+            "generations": generations_reference,
+            "execution": execution_reference,
+            "raw_scores": None,
+            "raw_scoring_manifest": None,
+        }
+        if stage == "raw"
+        else {
+            "generations": generations_reference,
+            "execution": execution_reference,
+            "raw_generations": raw_generation_reference,
+            "raw_execution": raw_execution_reference,
+        }
+    )
+    manifest_artifacts: dict[str, Any] = {
+        "scores": _payload_reference(
+            SCORES_NAME,
+            scores_payload,
+            rows=len(scores),
+        ),
+        "summary": _payload_reference(SUMMARY_NAME, summary_payload),
+    }
+    if stage == "synthesis":
+        manifest_artifacts["paired_scores"] = _payload_reference(
+            PAIRED_SCORES_NAME,
+            paired_scores_payload,
+            rows=len(paired_scores),
+        )
     scoring_manifest: dict[str, Any] = {
         "schema_version": SCORING_MANIFEST_SCHEMA_VERSION,
         "stage": stage,
@@ -1256,20 +1333,8 @@ def _score_run_with_labels(
         "labels": safe_labels_reference,
         "dataset_lineage": safe_dataset_lineage,
         "solution_retained": False,
-        "inputs": {
-            "generations": generations_reference,
-            "execution": execution_reference,
-            "raw_scores": raw_score_reference,
-            "raw_scoring_manifest": raw_scoring_reference,
-        },
-        "artifacts": {
-            "scores": _payload_reference(
-                SCORES_NAME,
-                scores_payload,
-                rows=len(scores),
-            ),
-            "summary": _payload_reference(SUMMARY_NAME, summary_payload),
-        },
+        "inputs": manifest_inputs,
+        "artifacts": manifest_artifacts,
         "reportable": summary["reportable"],
         "non_reportable_reasons": summary["non_reportable_reasons"],
     }
@@ -1280,8 +1345,10 @@ def _score_run_with_labels(
     payloads = [
         (run_dir / SCORES_NAME, scores_payload),
         (run_dir / SUMMARY_NAME, summary_payload),
-        (run_dir / SCORING_MANIFEST_NAME, scoring_manifest_payload),
     ]
+    if stage == "synthesis":
+        payloads.append((run_dir / PAIRED_SCORES_NAME, paired_scores_payload))
+    payloads.append((run_dir / SCORING_MANIFEST_NAME, scoring_manifest_payload))
     _preflight_payloads(payloads, force=force)
     for path, payload in payloads:
         publish_bytes(path, payload, force=force)

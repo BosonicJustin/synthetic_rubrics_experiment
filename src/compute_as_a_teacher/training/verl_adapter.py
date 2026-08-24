@@ -32,7 +32,13 @@ _PROCESS_GROUP_STOP_SECONDS = 10.0
 _WANDB_RUN_ID = re.compile(r"cat-[0-9a-f]{32}(?:-q-[a-z0-9_]+)?")
 _WANDB_SECRET_ENV = "WANDB_API_KEY"
 _LABEL_DERIVED_ARTIFACT_NAMES = frozenset(
-    {"scores.jsonl", "summary.json", "scoring_manifest.json", "final-experiment.json"}
+    {
+        "scores.jsonl",
+        "paired_scores.jsonl",
+        "summary.json",
+        "scoring_manifest.json",
+        "final-experiment.json",
+    }
 )
 
 

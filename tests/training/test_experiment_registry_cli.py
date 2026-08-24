@@ -22,6 +22,8 @@ def _final_stage_arguments() -> list[str]:
     return [
         "--preregistration",
         "artifacts/preregistration.json",
+        "--scoring-config",
+        "configs/evals/math500_scoring.toml",
         "--initial-raw-run-dir",
         "runs/initial-raw",
         "--initial-synthesis-run-dir",
@@ -61,6 +63,8 @@ class ExperimentRegistryCliTests(unittest.TestCase):
                     "runs/initial-raw",
                     "--initial-synthesis-config",
                     "configs/initial-synthesis.toml",
+                    "--scoring-config",
+                    "configs/evals/math500_scoring.toml",
                     "--training-run-dir",
                     "runs/training",
                     "--force",
@@ -72,6 +76,7 @@ class ExperimentRegistryCliTests(unittest.TestCase):
             CLI_ROOT / "artifacts/preregistration.json",
             CLI_ROOT / "runs/initial-raw",
             CLI_ROOT / "configs/initial-synthesis.toml",
+            CLI_ROOT / "configs/evals/math500_scoring.toml",
             CLI_ROOT / "runs/training",
             force=True,
         )
@@ -117,6 +122,7 @@ class ExperimentRegistryCliTests(unittest.TestCase):
         write.assert_called_once_with(
             CLI_ROOT / "artifacts/registry.json",
             CLI_ROOT / "artifacts/preregistration.json",
+            CLI_ROOT / "configs/evals/math500_scoring.toml",
             CLI_ROOT / "runs/initial-raw",
             CLI_ROOT / "runs/initial-synthesis",
             CLI_ROOT / "runs/training",
@@ -165,6 +171,7 @@ class ExperimentRegistryCliTests(unittest.TestCase):
         verify.assert_called_once_with(
             CLI_ROOT / "artifacts/registry.json",
             CLI_ROOT / "artifacts/preregistration.json",
+            CLI_ROOT / "configs/evals/math500_scoring.toml",
             CLI_ROOT / "runs/initial-raw",
             CLI_ROOT / "runs/initial-synthesis",
             CLI_ROOT / "runs/training",
@@ -204,6 +211,8 @@ class ExperimentRegistryCliTests(unittest.TestCase):
                     "runs/initial-raw",
                     "--initial-synthesis-config",
                     "configs/initial-synthesis.toml",
+                    "--scoring-config",
+                    "configs/evals/math500_scoring.toml",
                     "--training-run-dir",
                     "runs/training",
                 ]
@@ -225,6 +234,7 @@ class ExperimentRegistryCliTests(unittest.TestCase):
                 ]
             )
         self.assertIn("--initial-raw-run-dir", stderr.getvalue())
+        self.assertIn("--scoring-config", stderr.getvalue())
         self.assertIn("--trained-synthesis-run-dir", stderr.getvalue())
 
 

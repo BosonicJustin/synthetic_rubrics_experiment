@@ -56,6 +56,7 @@ from compute_as_a_teacher.evaluation.schemas import (  # noqa: E402
 )
 from compute_as_a_teacher.evaluation.scoring import (  # noqa: E402
     EvalLabel,
+    raw_baseline_selection,
     score_generation_rows,
     score_test_fixture_run,
 )
@@ -170,11 +171,13 @@ def qwen_synthesis_config() -> SynthesisEvalConfig:
 
 def scoring_config() -> ScoringConfig:
     return ScoringConfig(
-        schema_version=1,
+        schema_version=2,
         kind="scoring",
         protocol_version=MATH500_PROTOCOL_VERSION,
         labels_path="fixture/labels.jsonl",
         dataset_lock_path="fixture/unused.lock.json",
+        raw_baseline_selection="sha256_uniform_per_question_v1",
+        raw_baseline_seed=1729,
         primary_grader=PRIMARY_GRADER,
         diagnostic_graders=(),
         parsing_timeout_seconds=5,
@@ -282,6 +285,10 @@ class EvaluationPipelineTests(unittest.TestCase):
             raw_manifest, raw_requests = load_plan(raw_run, expected_kind="raw")
             self.assertEqual(raw_manifest["counts"]["requests"], 16)
             self.assertEqual(
+                raw_manifest["paper_contract"]["raw_primary_protocol_decision"],
+                "rollout_index_0",
+            )
+            self.assertEqual(
                 [request.task_id for request in raw_requests],
                 [
                     request.task_id
@@ -324,6 +331,8 @@ class EvaluationPipelineTests(unittest.TestCase):
             self.assertEqual(raw_metrics["empirical_any_correct_at_8"], 1.0)
             self.assertEqual(raw_metrics["literal_plurality_vote_accuracy"], 0.5)
             self.assertFalse(raw_summary["reportable"])
+            for name in ("scores.jsonl", "summary.json", "scoring_manifest.json"):
+                (raw_run / name).unlink()
 
             synthesis_run = root / "synthesis"
             write_synthesis_plan(
@@ -357,9 +366,27 @@ class EvaluationPipelineTests(unittest.TestCase):
                 raw_run_dir=raw_run,
             )
             metrics = synthesis_summary["graders"][PRIMARY_GRADER]
+            self.assertEqual(synthesis_summary["schema_version"], 2)
             self.assertEqual(metrics["synthesis_accuracy"], 1.0)
-            self.assertEqual(metrics["paired_delta_vs_raw_index_0"], 0.5)
-            self.assertEqual(metrics["paired_delta_vs_raw_mean"], 0.5)
+            self.assertEqual(metrics["raw_baseline_accuracy"], 0.0)
+            self.assertEqual(metrics["paired_delta_vs_raw_baseline"], 1.0)
+            self.assertEqual(synthesis_summary["counts"]["raw_candidate_generations"], 16)
+            self.assertEqual(
+                synthesis_summary["counts"]["raw_baseline_generations_scored"],
+                2,
+            )
+            paired = read_jsonl(synthesis_run / "paired_scores.jsonl")
+            self.assertEqual(len(paired), 2)
+            self.assertTrue(all(row["schema_version"] == 1 for row in paired))
+            self.assertEqual(
+                [(row["question_id"], row["selection"]["rollout_index"]) for row in paired],
+                [("fixture-alpha", 6), ("fixture-beta", 5)],
+            )
+            self.assertTrue(
+                all(row["grader_deltas"][PRIMARY_GRADER] == 1 for row in paired)
+            )
+            self.assertFalse((raw_run / "scores.jsonl").exists())
+            self.assertEqual(len(synthesis_backend.calls), 2)
             self.assertFalse(synthesis_summary["reportable"])
             self.assertTrue(
                 any(
@@ -367,6 +394,31 @@ class EvaluationPipelineTests(unittest.TestCase):
                     for reason in synthesis_summary["non_reportable_reasons"]
                 )
             )
+
+    def test_raw_baseline_selection_has_stable_golden_vectors(self) -> None:
+        expected = {
+            "fixture-alpha": (
+                6,
+                "6a2f8c9c29b98365cfb3c54378afe9997ade32b1363b4b15a1da3d1c4da3ef16",
+            ),
+            "fixture-beta": (
+                5,
+                "0dc54ae0c649ce33cde0aa38bc877bfb186258b93250f3cb69a85a12bc1659f5",
+            ),
+        }
+        for question_id, selection in expected.items():
+            self.assertEqual(
+                raw_baseline_selection(
+                    MATH500_PROTOCOL_VERSION,
+                    1729,
+                    question_id,
+                ),
+                selection,
+            )
+        self.assertNotEqual(
+            raw_baseline_selection(MATH500_PROTOCOL_VERSION, 1730, "fixture-alpha"),
+            expected["fixture-alpha"],
+        )
 
     def test_synthesis_anchor_relation_separates_initial_and_trained_eval(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -714,7 +766,7 @@ class EvaluationPipelineTests(unittest.TestCase):
                     scoring_config(),
                 )
 
-    def test_replaced_raw_outputs_invalidate_stale_raw_scores(self) -> None:
+    def test_synthesis_scoring_does_not_depend_on_stale_raw_scores(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             raw_run = self._write_raw_fixture_plan(root)
@@ -755,22 +807,6 @@ class EvaluationPipelineTests(unittest.TestCase):
                 self.synthesis_template,
             )
             execute_plan(synthesis_run, ScriptedFakeBackend(fixed_model()))
-            with self.assertRaisesRegex(EvaluationError, "changed since"):
-                score_test_fixture_run(
-                    synthesis_run,
-                    self.labels,
-                    self.labels_reference,
-                    scoring_config(),
-                    raw_run_dir=raw_run,
-                )
-
-            score_test_fixture_run(
-                raw_run,
-                self.labels,
-                self.labels_reference,
-                scoring_config(),
-                force=True,
-            )
             summary = score_test_fixture_run(
                 synthesis_run,
                 self.labels,
@@ -779,6 +815,10 @@ class EvaluationPipelineTests(unittest.TestCase):
                 raw_run_dir=raw_run,
             )
             self.assertFalse(summary["reportable"])
+            self.assertEqual(
+                summary["counts"]["raw_baseline_generations_scored"],
+                len(self.labels),
+            )
 
     def test_synthesis_scoring_rejects_a_different_raw_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

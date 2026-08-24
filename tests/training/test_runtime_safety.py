@@ -73,21 +73,25 @@ def _write_checkpoint(run_dir: Path, step: int, world_size: int) -> Path:
 
 class CheckpointSafetyTests(unittest.TestCase):
     def test_trainer_rejects_label_derived_artifacts_in_its_output_mount(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            scored = root / "evals/initial-raw"
-            scored.mkdir(parents=True)
-            (scored / "scores.jsonl").write_text("\n", encoding="utf-8")
-            environment = {
-                "CAT_SERVICE_ROLE": "trainer",
-                "CAT_OUTPUT_DIR": str(root),
-            }
-            with self.assertRaisesRegex(TrainingError, "label-derived artifacts"):
-                require_label_free_training_outputs(environment)
-            (scored / "scores.jsonl").unlink()
-            self.assertTrue(
-                require_label_free_training_outputs(environment)["enforced"]
-            )
+        for artifact_name in ("scores.jsonl", "paired_scores.jsonl"):
+            with self.subTest(artifact_name=artifact_name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary).resolve()
+                    scored = root / "evals/initial-raw"
+                    scored.mkdir(parents=True)
+                    (scored / artifact_name).write_text("\n", encoding="utf-8")
+                    environment = {
+                        "CAT_SERVICE_ROLE": "trainer",
+                        "CAT_OUTPUT_DIR": str(root),
+                    }
+                    with self.assertRaisesRegex(
+                        TrainingError, "label-derived artifacts"
+                    ):
+                        require_label_free_training_outputs(environment)
+                    (scored / artifact_name).unlink()
+                    self.assertTrue(
+                        require_label_free_training_outputs(environment)["enforced"]
+                    )
 
     def test_training_cli_import_does_not_load_gpu_or_model_frameworks(self) -> None:
         environment = os.environ.copy()

@@ -350,10 +350,11 @@ port. It verifies the existing contiguous result prefix and resumes pending requ
 do not add `--force`, delete result files, change the endpoint port, or create a new
 run directory.
 
-Resume only after an operational interruption. If a canary has the wrong model or
-finish reason, or lacks the prompt-required final `\boxed{...}`, stop and preserve
-the failure. Do not delete it, repeatedly regenerate it, or select a passing canary;
-continuing would require an explicit new protocol decision.
+Resume only after an operational interruption. A wrong response model or unsupported
+finish reason is an infrastructure failure and must stop the run. Missing, malformed,
+empty, or over-limit boxed extraction is an ordinary incorrect sample: preserve it,
+include it in the canary status counts, and continue. Never delete, regenerate, or
+cherry-pick a passing replacement.
 
 A successful final JSON result reports `registration_mode: "pilot"`, `pilot: true`,
 `preregistration_verified: false`, `4,000` raw and `500` synthesis requests, both
