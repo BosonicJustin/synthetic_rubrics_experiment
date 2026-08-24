@@ -106,13 +106,16 @@ class PreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             python = root / "python"
-            python.write_text("#!/bin/sh\n", encoding="utf-8")
-            python.chmod(0o755)
+            base_python = root / "base-python"
+            base_python.write_text("#!/bin/sh\n", encoding="utf-8")
+            base_python.chmod(0o755)
+            python.symlink_to(base_python)
             source = root / "verl"
             source.mkdir()
             observed = {}
 
             def runner(*args, **kwargs):
+                observed["argv"] = args[0]
                 observed.update(kwargs)
                 value = {
                     "package_inventory_sha256": "f" * 64,
@@ -129,6 +132,7 @@ class PreflightTests(unittest.TestCase):
                 runner=runner,
             )
             self.assertEqual(result["package_inventory_sha256"], "f" * 64)
+            self.assertEqual(observed["argv"][0], str(python))
             self.assertEqual(
                 observed["env"]["PYTHONPATH"],
                 str(REPOSITORY_ROOT / "src"),

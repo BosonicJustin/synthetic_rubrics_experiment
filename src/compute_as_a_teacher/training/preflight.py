@@ -664,7 +664,7 @@ def discover_runtime_identity(
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> dict[str, Any]:
-    python = Path(python_executable).resolve()
+    python = Path(python_executable).expanduser().absolute()
     source = Path(verl_source_path).resolve()
     repository = Path(repository_root).resolve()
     if not python.is_file() or not os.access(python, os.X_OK):
