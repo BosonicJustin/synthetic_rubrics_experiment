@@ -13,6 +13,7 @@ from compute_as_a_teacher.data.math500 import (
 )
 
 from .artifacts import read_jsonl
+from .baseline import run_baseline_sequence
 from .backend import execute_plan, ingest_responses
 from .config import (
     load_raw_config,
@@ -225,6 +226,26 @@ def _run_openai(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _run_baseline(args: argparse.Namespace) -> dict[str, Any]:
+    return run_baseline_sequence(
+        repository_root=REPOSITORY_ROOT,
+        raw_config_path=args.raw_config,
+        synthesis_config_path=args.synthesis_config,
+        pilot=args.pilot,
+        preregistration_path=args.preregistration,
+        training_run_dir=args.training_run_dir,
+        raw_run_dir=args.raw_run_dir,
+        synthesis_run_dir=args.synthesis_run_dir,
+        base_url=args.base_url,
+        api_key_env=args.api_key_env,
+        workers=args.workers,
+        batch_size=args.batch_size,
+        canary_results=args.canary_results,
+        synthesis_canary_results=args.synthesis_canary_results,
+        timeout_seconds=args.timeout_seconds,
+    )
+
+
 def _add_force(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--force",
@@ -307,6 +328,30 @@ def build_parser() -> argparse.ArgumentParser:
     run_openai.add_argument("--workers", type=int, default=8)
     run_openai.add_argument("--batch-size", type=int, default=16)
     run_openai.add_argument("--max-requests", type=int)
+
+    baseline = subparsers.add_parser(
+        "run-baseline",
+        help="Safely canary, resume, and complete raw then synthesis generation.",
+    )
+    baseline.add_argument("--raw-config", type=Path, required=True)
+    baseline.add_argument("--synthesis-config", type=Path, required=True)
+    registration = baseline.add_mutually_exclusive_group(required=True)
+    registration.add_argument(
+        "--pilot",
+        action="store_true",
+        help="Run an explicitly nonregistered, non-reportable pilot.",
+    )
+    registration.add_argument("--preregistration", type=Path)
+    baseline.add_argument("--training-run-dir", type=Path)
+    baseline.add_argument("--raw-run-dir", type=Path, required=True)
+    baseline.add_argument("--synthesis-run-dir", type=Path, required=True)
+    baseline.add_argument("--base-url", required=True)
+    baseline.add_argument("--api-key-env", default="")
+    baseline.add_argument("--timeout-seconds", type=float, default=120.0)
+    baseline.add_argument("--workers", type=int, default=8)
+    baseline.add_argument("--batch-size", type=int, default=16)
+    baseline.add_argument("--canary-results", type=int, default=16)
+    baseline.add_argument("--synthesis-canary-results", type=int, default=16)
     return parser
 
 
@@ -328,6 +373,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _score(args, "synthesis")
         elif args.command == "run-openai":
             result = _run_openai(args)
+        elif args.command == "run-baseline":
+            result = _run_baseline(args)
         else:
             result = _inspect(args)
     except (EvaluationError, DatasetPreparationError) as exc:
