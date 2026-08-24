@@ -619,9 +619,9 @@ def validate_verl_checkpoint(
         raise TrainingError("verl actor FSDP config has unexpected fields")
     if (
         type(fsdp_config["FSDP_version"]) is not int
-        or fsdp_config["FSDP_version"] != 1
+        or fsdp_config["FSDP_version"] not in {1, 2}
     ):
-        raise TrainingError("verl actor checkpoint must use FSDP version 1")
+        raise TrainingError("verl actor checkpoint must use FSDP version 1 or 2")
     world_size = fsdp_config.get("world_size")
     if type(world_size) is not int or world_size <= 0:
         raise TrainingError("verl actor FSDP world_size must be a positive integer")

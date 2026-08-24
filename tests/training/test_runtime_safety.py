@@ -49,7 +49,12 @@ def _resolved_config():
     return temporary, load_training_config(path)
 
 
-def _write_checkpoint(run_dir: Path, step: int, world_size: int) -> Path:
+def _write_checkpoint(
+    run_dir: Path,
+    step: int,
+    world_size: int,
+    fsdp_version: int = 1,
+) -> Path:
     checkpoint_root = run_dir / "checkpoints"
     actor_dir = checkpoint_root / f"global_step_{step}" / "actor"
     (actor_dir / "huggingface").mkdir(parents=True)
@@ -59,7 +64,7 @@ def _write_checkpoint(run_dir: Path, step: int, world_size: int) -> Path:
     )
     (actor_dir.parent / "data.pt").write_bytes(b"dataloader-state")
     (actor_dir / "fsdp_config.json").write_text(
-        json.dumps({"FSDP_version": 1, "world_size": world_size}),
+        json.dumps({"FSDP_version": fsdp_version, "world_size": world_size}),
         encoding="utf-8",
     )
     (actor_dir / "huggingface/config.json").write_text("{}\n", encoding="utf-8")
@@ -128,18 +133,27 @@ class CheckpointSafetyTests(unittest.TestCase):
                 "step:1 - actor/pg_loss:0.5\n",
             )
 
-    def test_validates_the_complete_pinned_fsdp_checkpoint_shape(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            run_dir = Path(temporary)
-            actor_dir = _write_checkpoint(run_dir, step=20, world_size=2)
-            self.assertEqual(
-                validate_verl_checkpoint(run_dir, 20, expected_world_size=2),
-                actor_dir.resolve(),
-            )
-            self.assertEqual(
-                checkpointed_step(run_dir, 1000, expected_world_size=2),
-                20,
-            )
+    def test_accepts_pinned_fsdp_checkpoint_versions(self) -> None:
+        for fsdp_version in (1, 2):
+            with (
+                self.subTest(fsdp_version=fsdp_version),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                run_dir = Path(temporary)
+                actor_dir = _write_checkpoint(
+                    run_dir,
+                    step=20,
+                    world_size=2,
+                    fsdp_version=fsdp_version,
+                )
+                self.assertEqual(
+                    validate_verl_checkpoint(run_dir, 20, expected_world_size=2),
+                    actor_dir.resolve(),
+                )
+                self.assertEqual(
+                    checkpointed_step(run_dir, 1000, expected_world_size=2),
+                    20,
+                )
 
     def test_launch_lock_rejects_concurrent_writers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -181,15 +195,16 @@ class CheckpointSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(TrainingError, "shard set is invalid"):
                 checkpointed_step(run_dir, 1000, expected_world_size=2)
 
-    def test_rejects_an_incompatible_fsdp_config(self) -> None:
+    def test_rejects_an_unsupported_fsdp_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
-            actor_dir = _write_checkpoint(run_dir, step=100, world_size=2)
-            (actor_dir / "fsdp_config.json").write_text(
-                json.dumps({"FSDP_version": 2, "world_size": 2}),
-                encoding="utf-8",
+            _write_checkpoint(
+                run_dir,
+                step=100,
+                world_size=2,
+                fsdp_version=3,
             )
-            with self.assertRaisesRegex(TrainingError, "FSDP version 1"):
+            with self.assertRaisesRegex(TrainingError, "FSDP version 1 or 2"):
                 checkpointed_step(run_dir, 1000, expected_world_size=2)
 
     def test_merge_requires_the_valid_fixed_final_checkpoint(self) -> None:
