@@ -1,0 +1,34 @@
+schema_version = 2
+kind = "synthesis"
+protocol_version = "cat_math500_paper_v1"
+run_name = "math500-qwen3-4b-synthesis"
+required_rollouts = 8
+anchor_relation = "same_as_raw"
+
+[prompt]
+path = "prompts/math500/synthesis_cot_appendix_f_literal.txt"
+version = "paper_appendix_f_cot_literal_v1"
+prefix = "/no_think\n"
+
+[anchor]
+provider = "openai-compatible"
+model_id = "Qwen/Qwen3-4B"
+revision = "1cfa9a7208912126459214e8b04321603b3df60c"
+tokenizer_id = "Qwen/Qwen3-4B"
+tokenizer_revision = "1cfa9a7208912126459214e8b04321603b3df60c"
+chat_template_sha256 = "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"
+adapter_version = "openai-compatible-chat-v1"
+dtype = "bfloat16"
+quantization = "none"
+seed_support = "best_effort"
+
+[sampling]
+do_sample = true
+temperature = 0.7
+top_p = 0.8
+top_k = 20
+max_new_tokens = 1536
+num_beams = 1
+repetition_penalty = 1.0
+stop = []
+base_seed = 2718
