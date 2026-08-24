@@ -29,11 +29,30 @@ from compute_as_a_teacher.training.verl_adapter import (  # noqa: E402
 
 
 EXAMPLE = REPOSITORY_ROOT / "configs/training/math500_cat_grpo.example.toml"
+SINGLE_H100_EXAMPLE = (
+    REPOSITORY_ROOT
+    / "configs/training/math500_cat_grpo.single_h100.example.toml"
+)
 
 
 def resolved_config_text() -> str:
     return (
         EXAMPLE.read_text(encoding="utf-8")
+        .replace("required_full_model_commit_sha", "a" * 40)
+        .replace("required_full_tokenizer_commit_sha", "b" * 40)
+        .replace("required_chat_template_sha256", "c" * 64)
+        .replace("required_absolute_python_from_verl_environment", "/opt/verl/bin/python")
+        .replace("required_absolute_verl_checkout", "/opt/verl/source")
+        .replace("required_absolute_local_model_snapshot", "/models/qwen3-4b")
+        .replace("required_model_snapshot_tree_sha256", "d" * 64)
+        .replace("required_trainer_image_digest", "sha256:" + "e" * 64)
+        .replace("required_target_package_inventory_sha256", "f" * 64)
+    )
+
+
+def resolved_single_h100_config_text() -> str:
+    return (
+        SINGLE_H100_EXAMPLE.read_text(encoding="utf-8")
         .replace("required_full_model_commit_sha", "a" * 40)
         .replace("required_full_tokenizer_commit_sha", "b" * 40)
         .replace("required_chat_template_sha256", "c" * 64)
@@ -66,6 +85,68 @@ class TrainingConfigTests(unittest.TestCase):
         config = load_text(resolved_config_text())
         self.assertFalse(config.unresolved_reasons())
         self.assertEqual(config.policy, config.anchor.model)
+
+    def test_single_h100_profile_changes_only_execution_settings(self) -> None:
+        canonical = load_text(resolved_config_text())
+        single = load_text(resolved_single_h100_config_text())
+        for name in (
+            "policy",
+            "anchor",
+            "rollouts",
+            "synthesis",
+            "reward",
+            "advantage",
+            "grpo",
+            "optimizer",
+            "checkpointing",
+        ):
+            self.assertEqual(getattr(single, name), getattr(canonical, name), name)
+        self.assertEqual(
+            single.runtime.hardware_profile,
+            "single_h100_colocated_pilot_v1",
+        )
+        self.assertEqual(single.runtime.gpus_per_node, 1)
+        self.assertEqual(single.runtime.tensor_parallel_size, 1)
+        self.assertTrue(single.runtime.actor_parameter_offload)
+        self.assertTrue(single.runtime.actor_optimizer_offload)
+        self.assertTrue(single.runtime.reference_parameter_offload)
+        self.assertTrue(single.runtime.enable_activation_offload)
+        self.assertEqual(single.runtime.anchor_max_concurrency, 1)
+        self.assertEqual(single.runtime.minimum_gpu_free_memory_fraction, 0.7)
+
+    def test_hardware_profile_is_versioned_and_fail_closed(self) -> None:
+        source = resolved_single_h100_config_text()
+        with self.assertRaisesRegex(TrainingError, "runtime.hardware_profile"):
+            load_text(
+                source.replace(
+                    'hardware_profile = "single_h100_colocated_pilot_v1"',
+                    'hardware_profile = "single_h100"',
+                )
+            )
+        with self.assertRaisesRegex(TrainingError, "for hardware profile"):
+            load_text(source.replace("gpus_per_node = 1", "gpus_per_node = 8"))
+
+    def test_schema_v2_canonical_runtime_remains_backward_compatible(self) -> None:
+        source = resolved_config_text()
+        new_keys = {
+            "hardware_profile",
+            "rollout_max_num_batched_tokens",
+            "rollout_max_num_seqs",
+            "enable_gradient_checkpointing",
+            "enable_activation_offload",
+            "actor_parameter_offload",
+            "actor_optimizer_offload",
+            "reference_parameter_offload",
+        }
+        legacy = "\n".join(
+            line
+            for line in source.splitlines()
+            if line.split(" = ", 1)[0] not in new_keys
+        )
+        config = load_text(legacy)
+        self.assertEqual(config.runtime.hardware_profile, "paper_8xh100_v1")
+        self.assertEqual(config.runtime.rollout_max_num_batched_tokens, 8192)
+        self.assertTrue(config.runtime.enable_gradient_checkpointing)
 
     def test_label_fields_and_protocol_changes_fail_closed(self) -> None:
         with self.assertRaisesRegex(TrainingError, "evaluation-only.*labels_path"):
@@ -238,6 +319,34 @@ class TrainingPlanningTests(unittest.TestCase):
         serialized = json.dumps(command.to_dict())
         self.assertNotIn("labels.jsonl", serialized)
         self.assertNotIn("solution", serialized)
+
+    def test_single_h100_translation_enables_memory_controls(self) -> None:
+        config = load_text(resolved_single_h100_config_text())
+        command = build_verl_command(
+            config,
+            repository_root=REPOSITORY_ROOT,
+            run_dir=Path("/tmp/cat-single-h100-test-run"),
+            training_data_path=Path("/tmp/cat-single-h100-test-run/math500_train.jsonl"),
+        )
+        overrides = set(command.argv[3:])
+        self.assertTrue(
+            {
+                "data.train_batch_size=256",
+                "actor_rollout_ref.rollout.n=8",
+                "actor_rollout_ref.model.enable_gradient_checkpointing=True",
+                "actor_rollout_ref.model.enable_activation_offload=True",
+                "actor_rollout_ref.actor.fsdp_config.param_offload=True",
+                "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
+                "actor_rollout_ref.ref.fsdp_config.param_offload=True",
+                "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
+                "actor_rollout_ref.rollout.gpu_memory_utilization=0.25",
+                "actor_rollout_ref.rollout.max_num_batched_tokens=4096",
+                "+actor_rollout_ref.rollout.engine_kwargs.vllm.max_num_seqs=16",
+                "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096",
+                "trainer.n_gpus_per_node=1",
+                "trainer.total_training_steps=1000",
+            }.issubset(overrides)
+        )
 
     def test_checkpoint_step_zero_is_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

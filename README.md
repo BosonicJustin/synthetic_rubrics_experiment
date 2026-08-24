@@ -126,6 +126,13 @@ registered. Canonical execution additionally requires a content-addressed approv
 over all three GPU qualification runs, a completed manual attestation, and numeric
 resource ceilings.
 
+The canonical profile remains the paper-aligned eight-H100 configuration above. For
+hardware qualification on a single 80 GB H100, use
+[`math500_cat_grpo.single_h100.example.toml`](configs/training/math500_cat_grpo.single_h100.example.toml).
+It preserves the scientific hyperparameters but co-locates a low-memory frozen
+anchor and trainer, so it is a noncanonical feasibility pilot and must pass the
+qualification gates before any full launch.
+
 ## Pinned source
 
 - Repository: [`HuggingFaceH4/MATH-500`](https://huggingface.co/datasets/HuggingFaceH4/MATH-500)

@@ -30,6 +30,7 @@ from compute_as_a_teacher.training.verl_adapter import VerlCommand  # noqa: E402
 from tests.training.test_config_and_planning import (  # noqa: E402
     load_text,
     resolved_config_text,
+    resolved_single_h100_config_text,
 )
 
 
@@ -425,6 +426,29 @@ class PreflightTests(unittest.TestCase):
             result["actor_optimizer"]["kind"] = None
             with self.assertRaisesRegex(TrainingError, "does not use AdamW"):
                 probe_runtime(config, command(), runner=runner)
+
+            single = load_text(resolved_single_h100_config_text())
+            result["actor_optimizer"]["kind"] = "torch.optim.AdamW"
+            result["gpu_count"] = 1
+            result["gpus"] = [
+                {
+                    "index": 0,
+                    "name": "NVIDIA H100 80GB HBM3",
+                    "capability": [9, 0],
+                    "bf16_supported": True,
+                    "free_memory_bytes": 60_000_000_000,
+                    "total_memory_bytes": 80_000_000_000,
+                }
+            ]
+            result["trainer_image_digest"] = None
+            observed = probe_runtime(single, command(), runner=runner)
+            self.assertEqual(
+                observed["runtime_identity"]["kind"],
+                "direct_host_package_inventory_v1",
+            )
+            result["trainer_image_digest"] = "sha256:" + "e" * 64
+            with self.assertRaisesRegex(TrainingError, "must not claim"):
+                probe_runtime(single, command(), runner=runner)
 
     def test_hydra_and_tokenizer_probes_are_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

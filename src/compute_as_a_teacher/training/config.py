@@ -45,6 +45,7 @@ _FORBIDDEN_CONFIG_KEYS = frozenset(
     }
 )
 _UNRESOLVED_PREFIXES = ("required_", "replace_", "todo_", "<")
+_DIRECT_HOST_IMAGE_SENTINEL = "not_applicable_direct_host"
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -219,6 +220,7 @@ class RuntimeSpec:
     anchor_api_key_env: str
     anchor_timeout_seconds: int
     anchor_max_concurrency: int
+    hardware_profile: str
     strategy: str
     nodes: int
     gpus_per_node: int
@@ -227,6 +229,13 @@ class RuntimeSpec:
     rollout_engine: str
     tensor_parallel_size: int
     gpu_memory_utilization: float
+    rollout_max_num_batched_tokens: int
+    rollout_max_num_seqs: int
+    enable_gradient_checkpointing: bool
+    enable_activation_offload: bool
+    actor_parameter_offload: bool
+    actor_optimizer_offload: bool
+    reference_parameter_offload: bool
     max_prompt_tokens: int
     max_tokens_per_gpu: int
     dataloader_workers: int
@@ -252,7 +261,13 @@ class RuntimeSpec:
                 reasons.append(f"runtime.{field_name} is unresolved")
             elif not re.fullmatch(r"[0-9a-f]{64}", value):
                 reasons.append(f"runtime.{field_name} must be a lowercase SHA-256")
-        if _looks_unresolved(self.trainer_image_digest):
+        if self.hardware_profile == "single_h100_colocated_pilot_v1":
+            if self.trainer_image_digest != _DIRECT_HOST_IMAGE_SENTINEL:
+                reasons.append(
+                    "runtime.trainer_image_digest must be "
+                    f"{_DIRECT_HOST_IMAGE_SENTINEL!r} for the direct-host pilot"
+                )
+        elif _looks_unresolved(self.trainer_image_digest):
             reasons.append("runtime.trainer_image_digest is unresolved")
         elif not re.fullmatch(r"sha256:[0-9a-f]{64}", self.trainer_image_digest):
             reasons.append(
@@ -554,13 +569,40 @@ def _parse_runtime(value: Any) -> RuntimeSpec:
         "model_snapshot_tree_sha256", "trainer_image_digest",
         "package_inventory_sha256", "anchor_base_url",
         "anchor_model", "anchor_api_key_env", "anchor_timeout_seconds",
-        "anchor_max_concurrency", "strategy", "nodes", "gpus_per_node",
+        "anchor_max_concurrency", "hardware_profile", "strategy", "nodes",
+        "gpus_per_node",
         "minimum_gpu_free_memory_fraction", "dtype",
         "rollout_engine", "tensor_parallel_size", "gpu_memory_utilization",
+        "rollout_max_num_batched_tokens", "rollout_max_num_seqs",
+        "enable_gradient_checkpointing", "enable_activation_offload",
+        "actor_parameter_offload", "actor_optimizer_offload",
+        "reference_parameter_offload",
         "max_prompt_tokens", "max_tokens_per_gpu", "dataloader_workers", "seed",
         "download_allowed",
     }
-    _exact_keys(table, expected, "runtime")
+    memory_keys = {
+        "hardware_profile",
+        "rollout_max_num_batched_tokens",
+        "rollout_max_num_seqs",
+        "enable_gradient_checkpointing",
+        "enable_activation_offload",
+        "actor_parameter_offload",
+        "actor_optimizer_offload",
+        "reference_parameter_offload",
+    }
+    if set(table) not in (expected, expected - memory_keys):
+        _exact_keys(table, expected, "runtime")
+    table = {
+        "hardware_profile": "paper_8xh100_v1",
+        "rollout_max_num_batched_tokens": 8192,
+        "rollout_max_num_seqs": 1024,
+        "enable_gradient_checkpointing": True,
+        "enable_activation_offload": False,
+        "actor_parameter_offload": False,
+        "actor_optimizer_offload": False,
+        "reference_parameter_offload": False,
+        **table,
+    }
     gpu_memory = _number(table["gpu_memory_utilization"], "runtime.gpu_memory_utilization", minimum=0.0)
     if not 0 < gpu_memory < 1:
         raise TrainingError("runtime.gpu_memory_utilization must be in (0, 1)")
@@ -600,6 +642,7 @@ def _parse_runtime(value: Any) -> RuntimeSpec:
         anchor_api_key_env=_text(table["anchor_api_key_env"], "runtime.anchor_api_key_env"),
         anchor_timeout_seconds=_integer(table["anchor_timeout_seconds"], "runtime.anchor_timeout_seconds", minimum=1),
         anchor_max_concurrency=_integer(table["anchor_max_concurrency"], "runtime.anchor_max_concurrency", minimum=1),
+        hardware_profile=_text(table["hardware_profile"], "runtime.hardware_profile"),
         strategy=_text(table["strategy"], "runtime.strategy"),
         nodes=_integer(table["nodes"], "runtime.nodes", minimum=1),
         gpus_per_node=_integer(table["gpus_per_node"], "runtime.gpus_per_node", minimum=1),
@@ -608,6 +651,36 @@ def _parse_runtime(value: Any) -> RuntimeSpec:
         rollout_engine=_text(table["rollout_engine"], "runtime.rollout_engine"),
         tensor_parallel_size=_integer(table["tensor_parallel_size"], "runtime.tensor_parallel_size", minimum=1),
         gpu_memory_utilization=gpu_memory,
+        rollout_max_num_batched_tokens=_integer(
+            table["rollout_max_num_batched_tokens"],
+            "runtime.rollout_max_num_batched_tokens",
+            minimum=1,
+        ),
+        rollout_max_num_seqs=_integer(
+            table["rollout_max_num_seqs"],
+            "runtime.rollout_max_num_seqs",
+            minimum=1,
+        ),
+        enable_gradient_checkpointing=_bool(
+            table["enable_gradient_checkpointing"],
+            "runtime.enable_gradient_checkpointing",
+        ),
+        enable_activation_offload=_bool(
+            table["enable_activation_offload"],
+            "runtime.enable_activation_offload",
+        ),
+        actor_parameter_offload=_bool(
+            table["actor_parameter_offload"],
+            "runtime.actor_parameter_offload",
+        ),
+        actor_optimizer_offload=_bool(
+            table["actor_optimizer_offload"],
+            "runtime.actor_optimizer_offload",
+        ),
+        reference_parameter_offload=_bool(
+            table["reference_parameter_offload"],
+            "runtime.reference_parameter_offload",
+        ),
         max_prompt_tokens=_integer(table["max_prompt_tokens"], "runtime.max_prompt_tokens", minimum=1),
         max_tokens_per_gpu=_integer(table["max_tokens_per_gpu"], "runtime.max_tokens_per_gpu", minimum=1),
         dataloader_workers=_integer(table["dataloader_workers"], "runtime.dataloader_workers"),
@@ -709,8 +782,6 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
         "framework_revision": SUPPORTED_VERL_REVISION,
         "adapter_version": SUPPORTED_ADAPTER_VERSION,
         "strategy": "fsdp",
-        "nodes": 1,
-        "gpus_per_node": 8,
         "dtype": "bfloat16",
         "rollout_engine": "vllm",
         "seed": 42,
@@ -719,10 +790,80 @@ def _validate_paper_profile(config: TrainingConfig) -> None:
     for name, expected in runtime_expected.items():
         if getattr(config.runtime, name) != expected:
             failures.append(f"runtime.{name} must be {expected!r}")
+    hardware_profiles: dict[str, dict[str, Any]] = {
+        "paper_8xh100_v1": {
+            "anchor_max_concurrency": 32,
+            "nodes": 1,
+            "gpus_per_node": 8,
+            "minimum_gpu_free_memory_fraction": 0.9,
+            "tensor_parallel_size": 2,
+            "gpu_memory_utilization": 0.5,
+            "rollout_max_num_batched_tokens": 8192,
+            "rollout_max_num_seqs": 1024,
+            "enable_gradient_checkpointing": True,
+            "enable_activation_offload": False,
+            "actor_parameter_offload": False,
+            "actor_optimizer_offload": False,
+            "reference_parameter_offload": False,
+            "max_tokens_per_gpu": 16384,
+            "dataloader_workers": 8,
+        },
+        "single_h100_offload_v1": {
+            "anchor_max_concurrency": 32,
+            "nodes": 1,
+            "gpus_per_node": 1,
+            "minimum_gpu_free_memory_fraction": 0.9,
+            "tensor_parallel_size": 1,
+            "gpu_memory_utilization": 0.3,
+            "rollout_max_num_batched_tokens": 4096,
+            "rollout_max_num_seqs": 64,
+            "enable_gradient_checkpointing": True,
+            "enable_activation_offload": True,
+            "actor_parameter_offload": True,
+            "actor_optimizer_offload": True,
+            "reference_parameter_offload": True,
+            "max_tokens_per_gpu": 4096,
+            "dataloader_workers": 2,
+        },
+        "single_h100_colocated_pilot_v1": {
+            "anchor_max_concurrency": 1,
+            "nodes": 1,
+            "gpus_per_node": 1,
+            "minimum_gpu_free_memory_fraction": 0.7,
+            "tensor_parallel_size": 1,
+            "gpu_memory_utilization": 0.25,
+            "rollout_max_num_batched_tokens": 4096,
+            "rollout_max_num_seqs": 16,
+            "enable_gradient_checkpointing": True,
+            "enable_activation_offload": True,
+            "actor_parameter_offload": True,
+            "actor_optimizer_offload": True,
+            "reference_parameter_offload": True,
+            "max_tokens_per_gpu": 4096,
+            "dataloader_workers": 2,
+        },
+    }
+    hardware_expected = hardware_profiles.get(config.runtime.hardware_profile)
+    if hardware_expected is None:
+        failures.append(
+            "runtime.hardware_profile must be one of "
+            f"{sorted(hardware_profiles)!r}"
+        )
+    else:
+        for name, expected in hardware_expected.items():
+            if getattr(config.runtime, name) != expected:
+                failures.append(
+                    f"runtime.{name} must be {expected!r} for hardware profile "
+                    f"{config.runtime.hardware_profile!r}"
+                )
     if config.runtime.max_tokens_per_gpu < (
         config.runtime.max_prompt_tokens + config.rollouts.sampling.max_new_tokens
     ):
         failures.append("runtime.max_tokens_per_gpu must cover one prompt and response")
+    if config.runtime.rollout_max_num_batched_tokens < config.runtime.max_prompt_tokens:
+        failures.append(
+            "runtime.rollout_max_num_batched_tokens must cover one maximum prompt"
+        )
     total_gpus = config.runtime.nodes * config.runtime.gpus_per_node
     if total_gpus % config.runtime.tensor_parallel_size:
         failures.append("total GPUs must be divisible by runtime.tensor_parallel_size")

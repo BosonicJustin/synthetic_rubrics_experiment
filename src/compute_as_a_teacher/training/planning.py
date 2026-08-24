@@ -100,6 +100,8 @@ def dry_run_summary(config: TrainingConfig, problem_count: int) -> dict[str, Any
         "labels_loaded": False,
         "framework_imported": False,
         "problems": problem_count,
+        "hardware_profile": config.runtime.hardware_profile,
+        "trainer_gpus": config.runtime.nodes * config.runtime.gpus_per_node,
         "prompt_batch_size": config.grpo.global_batch_size,
         "rollouts_per_prompt": config.rollouts.group_size,
         "trajectories_per_update": config.grpo.global_batch_size * config.rollouts.group_size,

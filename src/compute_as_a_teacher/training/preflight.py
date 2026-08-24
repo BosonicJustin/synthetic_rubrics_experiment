@@ -809,7 +809,10 @@ def probe_runtime(
             for gpu in gpus
         )
     ):
-        raise TrainingError("The canonical paper run requires BF16-capable H100 GPUs")
+        raise TrainingError(
+            f"Hardware profile {config.runtime.hardware_profile!r} requires "
+            "BF16-capable H100 GPUs"
+        )
     for gpu in gpus:
         free_memory = gpu.get("free_memory_bytes")
         total_memory = gpu.get("total_memory_bytes")
@@ -825,15 +828,30 @@ def probe_runtime(
                 f"GPU {gpu.get('index')} has insufficient free memory for launch"
             )
     digest = result.get("trainer_image_digest")
-    if not isinstance(digest, str) or not _IMAGE_DIGEST.fullmatch(digest):
-        raise TrainingError(
-            "CAT_TRAINER_IMAGE_DIGEST must contain the immutable trainer image digest"
-        )
-    if digest != config.runtime.trainer_image_digest:
-        raise TrainingError(
-            "Trainer image digest mismatch: "
-            f"expected {config.runtime.trainer_image_digest}, found {digest}"
-        )
+    if config.runtime.hardware_profile == "single_h100_colocated_pilot_v1":
+        if digest not in (None, ""):
+            raise TrainingError(
+                "The direct-host pilot must not claim CAT_TRAINER_IMAGE_DIGEST"
+            )
+        result["runtime_identity"] = {
+            "kind": "direct_host_package_inventory_v1",
+            "package_inventory_sha256": inventory_digest,
+            "framework_revision": config.runtime.framework_revision,
+        }
+    else:
+        if not isinstance(digest, str) or not _IMAGE_DIGEST.fullmatch(digest):
+            raise TrainingError(
+                "CAT_TRAINER_IMAGE_DIGEST must contain the immutable trainer image digest"
+            )
+        if digest != config.runtime.trainer_image_digest:
+            raise TrainingError(
+                "Trainer image digest mismatch: "
+                f"expected {config.runtime.trainer_image_digest}, found {digest}"
+            )
+        result["runtime_identity"] = {
+            "kind": "immutable_oci_image_v1",
+            "image_digest": digest,
+        }
     verl_module = result.get("verl_module")
     if not isinstance(verl_module, str):
         raise TrainingError("Runtime probe could not resolve the Verl module")
@@ -1415,6 +1433,11 @@ def run_preflight(
         missing.append("model content hash")
     if not check_anchor:
         missing.append("anchor canary")
+    runtime_limitation = (
+        "direct_host_runtime_is_bound_by_package_inventory_not_an_immutable_image"
+        if config.runtime.hardware_profile == "single_h100_colocated_pilot_v1"
+        else "trainer_image_digest_is_operator_supplied"
+    )
     receipt: dict[str, Any] = {
         "schema_version": 2,
         "kind": "cat_training_preflight",
@@ -1429,7 +1452,7 @@ def run_preflight(
         "attestation_limitations": [
             "anchor_endpoint_weights_and_hardware_are_not_content_attested",
             "anchor_seed_and_top_k_semantics_are_not_content_attested",
-            "trainer_image_digest_is_operator_supplied",
+            runtime_limitation,
         ],
     }
     receipt["preflight_fingerprint"] = sha256_bytes(canonical_json_bytes(receipt))

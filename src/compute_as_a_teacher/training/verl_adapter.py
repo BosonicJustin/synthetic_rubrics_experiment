@@ -362,8 +362,18 @@ def build_verl_command(
         "data.custom_cls.name=JsonlRLHFDataset",
         f"actor_rollout_ref.model.path={_hydra_string(runtime.model_path)}",
         "actor_rollout_ref.model.trust_remote_code=False",
+        "actor_rollout_ref.model.enable_gradient_checkpointing="
+        f"{_hydra_bool(runtime.enable_gradient_checkpointing)}",
+        "actor_rollout_ref.model.enable_activation_offload="
+        f"{_hydra_bool(runtime.enable_activation_offload)}",
         f"actor_rollout_ref.actor.strategy={runtime.strategy}",
         f"actor_rollout_ref.ref.strategy={runtime.strategy}",
+        "actor_rollout_ref.actor.fsdp_config.param_offload="
+        f"{_hydra_bool(runtime.actor_parameter_offload)}",
+        "actor_rollout_ref.actor.fsdp_config.optimizer_offload="
+        f"{_hydra_bool(runtime.actor_optimizer_offload)}",
+        "actor_rollout_ref.ref.fsdp_config.param_offload="
+        f"{_hydra_bool(runtime.reference_parameter_offload)}",
         f"actor_rollout_ref.actor.optim.lr={config.grpo.learning_rate}",
         f"actor_rollout_ref.actor.optim.lr_warmup_steps={config.grpo.warmup_steps}",
         "actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.0",
@@ -393,6 +403,10 @@ def build_verl_command(
         f"actor_rollout_ref.rollout.dtype={runtime.dtype}",
         f"actor_rollout_ref.rollout.tensor_model_parallel_size={runtime.tensor_parallel_size}",
         f"actor_rollout_ref.rollout.gpu_memory_utilization={runtime.gpu_memory_utilization}",
+        "actor_rollout_ref.rollout.max_num_batched_tokens="
+        f"{runtime.rollout_max_num_batched_tokens}",
+        "+actor_rollout_ref.rollout.engine_kwargs.vllm.max_num_seqs="
+        f"{runtime.rollout_max_num_seqs}",
         "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True",
         f"actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu={runtime.max_tokens_per_gpu}",
         "actor_rollout_ref.rollout.ignore_eos=False",

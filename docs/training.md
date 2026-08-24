@@ -121,6 +121,41 @@ inventory, but does not discover an image digest. Keep
 `runtime.download_allowed = false`; launch also exports `HF_HUB_OFFLINE=1` and
 `TRANSFORMERS_OFFLINE=1`.
 
+## One-H100 co-located pilot
+
+The canonical [`math500_cat_grpo.example.toml`](../configs/training/math500_cat_grpo.example.toml)
+profile remains the eight-H100 reproduction target. When only one 80 GB H100 is
+available, start from
+[`math500_cat_grpo.single_h100.example.toml`](../configs/training/math500_cat_grpo.single_h100.example.toml).
+That pilot keeps the paper-facing group size, global batch, sampling, learning rate,
+KL coefficient, token limits, and 1,000-step schedule unchanged. Its one-GPU FSDP,
+checkpointing, CPU offload, and reduced vLLM batching are execution changes.
+
+The pilot places the frozen anchor and trainer on the same physical GPU, which is a
+noncanonical topology and must be reported as such. Keep the anchor small and
+serial; the example fixes trainer-side `anchor_max_concurrency = 1`, and a matching
+vLLM launch is:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 vllm serve \
+  "/abs/path/to/snapshots/$CAT_MODEL_REVISION" \
+  --served-model-name cat-frozen-qwen3-4b \
+  --host 127.0.0.1 --port 18001 \
+  --generation-config vllm \
+  --gpu-memory-utilization 0.20 \
+  --max-model-len 16384 \
+  --max-num-seqs 1
+```
+
+Resolve the model, tokenizer, Verl revision, and package-inventory identities as
+for the canonical config. The direct-host pilot deliberately uses
+`trainer_image_digest = "not_applicable_direct_host"` and rejects a claimed OCI
+digest because the live environment was not launched from an attested image. Do not
+start the full 1,000-step pilot until `one_step`, `resume_three_step`, and
+`full_shape_five_step` qualification have all passed without OOMs, anchor failures,
+or non-finite metrics. Passing those gates establishes feasibility for this pilot;
+it does not turn it into the canonical eight-H100 reproduction.
+
 ## Frozen anchor service
 
 The reward worker expects an OpenAI-compatible chat-completions endpoint at
@@ -146,9 +181,11 @@ Keep the service name, endpoint, and API-key environment-variable name aligned w
 the training config. Verify that the server honors `top_k`, `seed`, and the same
 tokenizer/chat template. An unavailable or malformed endpoint fails the reward batch;
 an unextractable synthesized answer follows the versioned zero-task-reward policy.
-Gold answers are never a fallback. The trainer must see exactly eight separate H100s,
-none visible to the anchor. If there is no ninth local GPU, serve the anchor on
-another host or otherwise isolated hardware and update `runtime.anchor_base_url`.
+Gold answers are never a fallback. In the canonical profile, the trainer must see
+exactly eight separate H100s, none visible to the anchor. If there is no ninth local
+GPU, serve the anchor on another host or otherwise isolated hardware and update
+`runtime.anchor_base_url`. The one-H100 profile above is the explicitly noncanonical
+co-location exception.
 
 ## Optional W&B tracking
 
@@ -287,9 +324,10 @@ This rehashes the snapshot against the config pin; validates Qwen safetensors he
 shard indexes, BF16 tensor storage/no-quantization config, tokenizer assets, and chat template;
 checks separate policy and worst-case eight-rollout synthesis context budgets;
 tokenizes all 500 prompts; and composes the real Hydra job. It also requires the
-exact pinned package inventory and trainer image, imports the repository dataset and
-reward hooks from their expected paths, checks the reward signature, inventories
-eight BF16 H100s, and enforces the configured free-memory floor before sending a
+exact pinned package inventory and, for the canonical profile, trainer image. It
+imports the repository dataset and reward hooks from their expected paths, checks
+the reward signature, inventories the H100 count required by the selected hardware
+profile, and enforces the configured free-memory floor before sending a
 short semantic anchor canary and an exact-tokenized long-context canary whose boxed
 nonce appears only near the tail. This verifies request acceptance and preservation
 of that unique late value, not the endpoint's hidden truncation implementation. Omit
@@ -548,7 +586,6 @@ and distributed runtime are not content-attested. `run-openai` is also marked
 non-reportable because an HTTP endpoint cannot prove it serves the registered
 checkpoint. Supplying the external evidence required for launch does not change
 those hard-coded reportability fields; scientific reportability requires a new
-versioned execution backend and schema. No training or real-model evaluation has
-been run as part of building this planning and contract infrastructure. The staged
-gates, observability record, seed policy, and token/cost ceilings are in the
+versioned execution backend and schema. The staged gates, observability record,
+seed policy, and token/cost ceilings are in the
 [experiment plan](experiment_plan.md).

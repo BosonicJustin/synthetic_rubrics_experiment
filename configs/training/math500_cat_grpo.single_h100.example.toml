@@ -1,12 +1,10 @@
 schema_version = 2
 kind = "cat_grpo"
 protocol_version = "cat_math500_grpo_verl_v2"
-run_name = "qwen3-4b-math500-cat"
+run_name = "qwen3-4b-math500-cat-single-h100-colocated-pilot"
 questions_path = "data/math500/questions.jsonl"
 dataset_lock_path = "configs/datasets/math500.lock.json"
 
-# These identity fields must be replaced with the immutable model snapshot that
-# is present locally before a real plan can be written. Dry-run accepts them.
 [policy]
 provider = "huggingface"
 model_id = "Qwen/Qwen3-4B"
@@ -83,8 +81,6 @@ labels_allowed = false
 max_answer_chars = 50000
 invalid_anchor = "reward_zero"
 
-# Local choice matching verl v0.5.0: torch.std uses Bessel correction. The
-# paper writes sigma_G but does not publish ddof, epsilon, or constant-group handling.
 [advantage]
 kind = "group_zscore"
 std_ddof = 1
@@ -106,8 +102,6 @@ ppo_epochs = 1
 ppo_mini_batch_size = 256
 normalize_advantages = true
 
-# AdamW is paper-specified. The numerical details below are declared local
-# choices; verl v0.5.0 uses these defaults.
 [optimizer]
 name = "adamw"
 betas = [0.9, 0.999]
@@ -133,7 +127,7 @@ sdk_version = "0.21.1"
 api_key_env = "WANDB_API_KEY"
 resume = "allow"
 group = "math500-cat-grpo"
-tags = ["math500", "compute-as-a-teacher", "rl-synthesis"]
+tags = ["math500", "compute-as-a-teacher", "rl-synthesis", "single-h100", "colocated-pilot"]
 
 [runtime]
 framework = "verl"
@@ -144,33 +138,32 @@ python_executable = "required_absolute_python_from_verl_environment"
 verl_source_path = "required_absolute_verl_checkout"
 model_path = "required_absolute_local_model_snapshot"
 model_snapshot_tree_sha256 = "required_model_snapshot_tree_sha256"
-trainer_image_digest = "required_trainer_image_digest"
+trainer_image_digest = "not_applicable_direct_host"
 package_inventory_sha256 = "required_target_package_inventory_sha256"
-anchor_base_url = "http://127.0.0.1:8001/v1"
+# Qualification-only topology: the frozen anchor shares the trainer H100.
+anchor_base_url = "http://127.0.0.1:18001/v1"
 anchor_model = "cat-frozen-qwen3-4b"
 anchor_api_key_env = "CAT_ANCHOR_API_KEY"
 anchor_timeout_seconds = 300
-anchor_max_concurrency = 32
-hardware_profile = "paper_8xh100_v1"
+anchor_max_concurrency = 1
+hardware_profile = "single_h100_colocated_pilot_v1"
 strategy = "fsdp"
 nodes = 1
-gpus_per_node = 8
-# Local launch-safety choice; preflight refuses substantially occupied trainers.
-minimum_gpu_free_memory_fraction = 0.9
+gpus_per_node = 1
+minimum_gpu_free_memory_fraction = 0.7
 dtype = "bfloat16"
 rollout_engine = "vllm"
-tensor_parallel_size = 2
-gpu_memory_utilization = 0.5
-rollout_max_num_batched_tokens = 8192
-rollout_max_num_seqs = 1024
+tensor_parallel_size = 1
+gpu_memory_utilization = 0.25
+rollout_max_num_batched_tokens = 4096
+rollout_max_num_seqs = 16
 enable_gradient_checkpointing = true
-enable_activation_offload = false
-actor_parameter_offload = false
-actor_optimizer_offload = false
-reference_parameter_offload = false
+enable_activation_offload = true
+actor_parameter_offload = true
+actor_optimizer_offload = true
+reference_parameter_offload = true
 max_prompt_tokens = 2048
-max_tokens_per_gpu = 16384
-dataloader_workers = 8
-# Local data-order seed; rollout and synthesis use their own base seeds above.
+max_tokens_per_gpu = 4096
+dataloader_workers = 2
 seed = 42
 download_allowed = false
